@@ -94,6 +94,19 @@ async def logout(request: Request):
     request.session.clear()
     return RedirectResponse(url='/', status_code=303)
 
+
+# --- Web App Manifest ---
+@app.get('/manifest.json')
+async def manifest():
+    return {
+        "name": "Collaborative Checklists",
+        "short_name": "Checklists",
+        "start_url": "/",
+        "display": "standalone",
+        "background_color": "#111827",
+        "theme_color": "#2563eb"
+    }
+
 # --- Frontend Route ---
 @app.get('/')
 async def index(request: Request):
