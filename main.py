@@ -33,6 +33,7 @@ templates = Jinja2Templates(directory="templates")
 # --- Pydantic Models ---
 class ListCreate(BaseModel):
     title: str
+    is_resettable: bool = False
 
 class TaskCreate(BaseModel):
     title: str
@@ -123,11 +124,11 @@ async def create_list(payload: ListCreate, request: Request):
     user = get_current_user(request)
     conn = sqlite3.connect("checklist.db")
     cursor = conn.cursor()
-    cursor.execute("INSERT INTO lists (user_id, title) VALUES (?, ?)", (user['id'], payload.title))
+    cursor.execute("INSERT INTO lists (user_id, title, is_resettable) VALUES (?, ?, ?)", (user['id'], payload.title, 1 if payload.is_resettable else 0))
     conn.commit()
     list_id = cursor.lastrowid
     conn.close()
-    return {"id": list_id, "title": payload.title, "user_id": user['id']}
+    return {"id": list_id, "title": payload.title, "is_resettable": payload.is_resettable, "user_id": user['id']}
 
 @app.delete('/api/lists/{list_id}')
 async def delete_list(list_id: int, request: Request):
