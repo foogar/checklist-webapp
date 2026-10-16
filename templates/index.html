@@ -16,28 +16,28 @@
 </head>
 <body class="bg-gray-50 dark:bg-gray-900 text-gray-900 dark:text-gray-100 min-h-screen transition-colors duration-200">
 
-    <div class="max-w-4xl mx-auto px-4 py-8">
+    <div class="max-w-4xl mx-auto px-4 py-4 sm:py-8">
         <!-- Header -->
-        <header class="flex justify-between items-center mb-8 pb-4 border-b border-gray-200 dark:border-gray-800">
-            <h1 class="text-2xl font-bold tracking-tight">Checklists</h1>
+        <header class="flex justify-between items-center mb-4 pb-3 border-b border-gray-200 dark:border-gray-800">
+            <h1 class="text-xl font-bold tracking-tight">Checklists</h1>
             
-            <div class="flex items-center space-x-4">
+            <div class="flex items-center space-x-3">
                 <!-- Dark Mode Toggle -->
-                <button @click="toggleDarkMode()" class="p-2 rounded-lg bg-gray-200 dark:bg-gray-800 hover:bg-gray-300 dark:hover:bg-gray-700 transition">
-                    <svg x-show="!darkMode" class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z"></path></svg>
-                    <svg x-show="darkMode" class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z"></path></svg>
+                <button @click="toggleDarkMode()" class="p-1.5 rounded-lg bg-gray-200 dark:bg-gray-800 hover:bg-gray-300 dark:hover:bg-gray-700 transition">
+                    <svg x-show="!darkMode" class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z"></path></svg>
+                    <svg x-show="darkMode" class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z"></path></svg>
                 </button>
 
                 <!-- Auth Section -->
                 <template x-if="user">
-                    <div class="flex items-center space-x-3">
-                        <span class="text-sm font-medium text-gray-600 dark:text-gray-300" x-text="user.name"></span>
-                        <a href="/auth/logout" class="text-sm text-red-600 dark:text-red-400 hover:underline">Logout</a>
+                    <div class="flex items-center space-x-2">
+                        <span class="text-xs font-medium text-gray-600 dark:text-gray-300" x-text="user.name"></span>
+                        <a href="/auth/logout" class="text-xs text-red-600 dark:text-red-400 hover:underline">Logout</a>
                     </div>
                 </template>
                 <template x-if="!user">
-                    <a href="/auth/login" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg text-sm font-medium transition">
-                        Sign in with Google
+                    <a href="/auth/login" class="bg-blue-600 hover:bg-blue-700 text-white px-3 py-1.5 rounded-lg text-xs font-medium transition">
+                        Sign in
                     </a>
                 </template>
             </div>
@@ -46,84 +46,80 @@
         <!-- Main Content (Only if Logged In) -->
         <template x-if="user">
             <div>
-                <!-- Create List Form / Tabs -->
-                <div class="mb-6 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
-                    <!-- Tabs -->
-                    <div class="flex flex-wrap gap-2 border-b border-gray-200 dark:border-gray-800 pb-2 w-full sm:w-auto">
+                <!-- Tabs & New List Button Row -->
+                <div class="mb-4 flex items-center justify-between gap-2 overflow-x-auto pb-2 border-b border-gray-200 dark:border-gray-800">
+                    <div class="flex items-center gap-2 flex-nowrap">
                         <template x-for="list in lists" :key="list.id">
                             <button @click="selectList(list)"
                                     :class="activeList && activeList.id === list.id ? 'bg-blue-600 text-white' : 'bg-gray-200 dark:bg-gray-800 text-gray-700 dark:text-gray-300 hover:bg-gray-300 dark:hover:bg-gray-700'"
-                                    class="px-4 py-2 rounded-lg text-sm font-medium transition flex items-center space-x-2">
+                                    class="px-3 py-1.5 rounded-lg text-xs font-medium transition flex items-center space-x-1.5 whitespace-nowrap">
                                 <span x-text="list.title"></span>
-                                <span x-show="list.owner_name && list.owner_name !== user.name" class="text-xs opacity-75" x-text="'(' + list.owner_name + ')'"></span>
+                                <span x-show="list.owner_name && list.owner_name !== user.name" class="text-[10px] opacity-75" x-text="'(' + list.owner_name + ')'"></span>
                             </button>
                         </template>
                     </div>
 
-                    <!-- New List Trigger -->
-                    <button @click="showNewListModal = true" class="whitespace-nowrap bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded-lg text-sm font-medium transition">
-                        + New List
+                    <!-- New List Trigger Inline -->
+                    <button @click="showNewListModal = true" class="whitespace-nowrap bg-green-600 hover:bg-green-700 text-white px-3 py-1.5 rounded-lg text-xs font-medium transition shrink-0">
+                        + New
                     </button>
                 </div>
 
                 <!-- Active List Workspace -->
                 <template x-if="activeList">
-                    <div class="bg-white dark:bg-gray-800 rounded-xl shadow-sm border border-gray-200 dark:border-gray-700 p-6">
-                        <div class="flex justify-between items-center mb-6">
-                            <div>
-                                <h2 class="text-xl font-semibold" x-text="activeList.title"></h2>
-                                <p class="text-xs text-gray-500 dark:text-gray-400 mt-1" x-text="activeList.is_resettable ? 'Manual Reset Daily List' : 'Standard List'"></p>
-                            </div>
+                    <div class="bg-white dark:bg-gray-800 rounded-xl shadow-sm border border-gray-200 dark:border-gray-700 p-4">
+                        <div class="flex justify-between items-center mb-3">
+                            <p class="text-[11px] text-gray-500 dark:text-gray-400" x-text="activeList.is_resettable ? 'Manual Reset Daily List' : 'Standard List'"></p>
                             <div class="flex space-x-2">
-                                <button x-show="activeList.is_resettable && activeList.user_id === user.id" @click="resetList()" class="bg-amber-600 hover:bg-amber-700 text-white px-3 py-1.5 rounded-lg text-xs font-medium transition">
-                                    Reset List
+                                <button x-show="activeList.is_resettable && String(activeList.user_id) === String(user.id)" @click="resetList()" class="bg-amber-600 hover:bg-amber-700 text-white px-2 py-1 rounded text-[11px] font-medium transition">
+                                    Reset
                                 </button>
-                                <button x-show="activeList.user_id === user.id" @click="deleteList(activeList.id)" class="text-red-600 hover:text-red-800 dark:text-red-400 dark:hover:text-red-300 text-xs font-medium px-2 py-1">
-                                    Delete List
+                                <button x-show="String(activeList.user_id) === String(user.id)" @click="deleteList(activeList.id)" class="text-red-600 hover:text-red-800 dark:text-red-400 dark:hover:text-red-300 text-[11px] font-medium px-1 py-1">
+                                    Delete
                                 </button>
                             </div>
                         </div>
 
                         <!-- Add Task Input -->
-                        <form @submit.prevent="addTask" class="flex gap-2 mb-6">
+                        <form @submit.prevent="addTask" class="flex gap-2 mb-3">
                             <input type="text" x-model="newTaskTitle" placeholder="Add a new task..." 
-                                   class="flex-1 bg-gray-50 dark:bg-gray-900 border border-gray-300 dark:border-gray-700 rounded-lg px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
-                            <button type="submit" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg text-sm font-medium transition">Add</button>
+                                   class="flex-1 bg-gray-50 dark:bg-gray-900 border border-gray-300 dark:border-gray-700 rounded-lg px-3 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-blue-500">
+                            <button type="submit" class="bg-blue-600 hover:bg-blue-700 text-white px-3 py-1.5 rounded-lg text-xs font-medium transition">Add</button>
                         </form>
 
-                        <!-- Pending Tasks -->
-                        <div class="space-y-2 mb-6">
+                        <!-- Pending Tasks (Compacted) -->
+                        <div class="space-y-1.5 mb-3">
                             <template x-for="(task, index) in pendingTasks" :key="task.id">
-                                <div class="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-900/50 rounded-lg border border-gray-200 dark:border-gray-800">
-                                    <label class="flex items-center space-x-3 cursor-pointer flex-1">
-                                        <input type="checkbox" @change="toggleTaskStatus(task)" class="w-4 h-4 text-blue-600 rounded focus:ring-blue-500">
-                                        <span class="text-sm" x-text="task.title"></span>
+                                <div class="flex items-center justify-between px-2.5 py-1.5 bg-gray-50 dark:bg-gray-900/50 rounded-lg border border-gray-200 dark:border-gray-800">
+                                    <label class="flex items-center space-x-2.5 cursor-pointer flex-1">
+                                        <input type="checkbox" @change="toggleTaskStatus(task)" class="w-3.5 h-3.5 text-blue-600 rounded focus:ring-blue-500">
+                                        <span class="text-xs" x-text="task.title"></span>
                                     </label>
-                                    <div class="flex items-center space-x-2">
+                                    <div class="flex items-center space-x-1">
                                         <!-- Reorder Buttons -->
-                                        <div class="flex space-x-1">
-                                            <button type="button" @click="moveTask(index, 'up')" class="text-xs px-2 py-1 bg-gray-200 dark:bg-gray-700 rounded hover:bg-gray-300 dark:hover:bg-gray-600">▲</button>
-                                            <button type="button" @click="moveTask(index, 'down')" class="text-xs px-2 py-1 bg-gray-200 dark:bg-gray-700 rounded hover:bg-gray-300 dark:hover:bg-gray-600">▼</button>
+                                        <div class="flex space-x-0.5">
+                                            <button type="button" @click="moveTask(index, 'up')" class="text-[10px] px-1.5 py-0.5 bg-gray-200 dark:bg-gray-700 rounded hover:bg-gray-300 dark:hover:bg-gray-600">▲</button>
+                                            <button type="button" @click="moveTask(index, 'down')" class="text-[10px] px-1.5 py-0.5 bg-gray-200 dark:bg-gray-700 rounded hover:bg-gray-300 dark:hover:bg-gray-600">▼</button>
                                         </div>
-                                        <button @click="deleteTask(task.id)" class="text-gray-400 hover:text-red-600 dark:hover:text-red-400 text-sm ml-2">×</button>
+                                        <button @click="deleteTask(task.id)" class="text-gray-400 hover:text-red-600 dark:hover:text-red-400 text-xs ml-1 px-1">×</button>
                                     </div>
                                 </div>
                             </template>
-                            <p x-show="pendingTasks.length === 0" class="text-sm text-gray-400 text-center py-4">No active tasks.</p>
+                            <p x-show="pendingTasks.length === 0" class="text-xs text-gray-400 text-center py-2">No active tasks.</p>
                         </div>
 
-                        <!-- Completed Tasks Section -->
+                        <!-- Completed Tasks Section (Compacted) -->
                         <template x-if="completedTasks.length > 0">
-                            <div class="border-t border-gray-200 dark:border-gray-700 pt-4">
-                                <h3 class="text-sm font-medium text-gray-500 dark:text-gray-400 mb-3">Completed</h3>
-                                <div class="space-y-2">
+                            <div class="border-t border-gray-200 dark:border-gray-700 pt-3">
+                                <h3 class="text-xs font-medium text-gray-500 dark:text-gray-400 mb-2">Completed</h3>
+                                <div class="space-y-1.5">
                                     <template x-for="task in completedTasks" :key="task.id">
-                                        <div class="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-900/50 rounded-lg border border-gray-200 dark:border-gray-800 opacity-75">
-                                            <label class="flex items-center space-x-3 cursor-pointer flex-1">
-                                                <input type="checkbox" checked @change="toggleTaskStatus(task)" class="w-4 h-4 text-blue-600 rounded focus:ring-blue-500">
-                                                <span class="text-sm line-through" x-text="task.title"></span>
+                                        <div class="flex items-center justify-between px-2.5 py-1.5 bg-gray-50 dark:bg-gray-900/50 rounded-lg border border-gray-200 dark:border-gray-800 opacity-75">
+                                            <label class="flex items-center space-x-2.5 cursor-pointer flex-1">
+                                                <input type="checkbox" checked @change="toggleTaskStatus(task)" class="w-3.5 h-3.5 text-blue-600 rounded focus:ring-blue-500">
+                                                <span class="text-xs line-through" x-text="task.title"></span>
                                             </label>
-                                            <button @click="deleteTask(task.id)" class="text-gray-400 hover:text-red-600 dark:hover:text-red-400 text-sm">×</button>
+                                            <button @click="deleteTask(task.id)" class="text-gray-400 hover:text-red-600 dark:hover:text-red-400 text-xs px-1">×</button>
                                         </div>
                                     </template>
                                 </div>
@@ -131,13 +127,13 @@
                         </template>
 
                         <!-- Share List Section (Owner Only) -->
-                        <template x-if="activeList.user_id === user.id">
-                            <div class="mt-6 pt-4 border-t border-gray-200 dark:border-gray-700">
-                                <h3 class="text-sm font-semibold mb-2">Share this List</h3>
+                        <template x-if="String(activeList.user_id) === String(user.id)">
+                            <div class="mt-4 pt-3 border-t border-gray-200 dark:border-gray-700">
+                                <h3 class="text-xs font-semibold mb-1.5">Share this List</h3>
                                 <div class="flex space-x-2">
                                     <input type="email" x-model="shareEmail" placeholder="friend@example.com" 
-                                           class="flex-1 bg-gray-50 dark:bg-gray-900 border border-gray-300 dark:border-gray-700 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
-                                    <button @click="shareList()" class="px-4 py-1.5 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition">Share</button>
+                                           class="flex-1 bg-gray-50 dark:bg-gray-900 border border-gray-300 dark:border-gray-700 rounded-lg px-2.5 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-blue-500">
+                                    <button @click="shareList()" class="px-3 py-1 text-xs bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition">Share</button>
                                 </div>
                             </div>
                         </template>
@@ -145,7 +141,7 @@
                 </template>
 
                 <template x-if="!activeList && lists.length === 0">
-                    <div class="text-center py-12 text-gray-500">
+                    <div class="text-center py-12 text-gray-500 text-xs">
                         <p>No checklists found. Create your first list to get started!</p>
                     </div>
                 </template>
@@ -154,9 +150,9 @@
 
         <template x-if="!user">
             <div class="text-center py-20">
-                <h2 class="text-2xl font-semibold mb-4">Welcome to Collaborative Checklists</h2>
-                <p class="text-gray-500 dark:text-gray-400 mb-6">Sign in with your Google account to manage and share your lists.</p>
-                <a href="/auth/login" class="bg-blue-600 hover:bg-blue-700 text-white px-6 py-3 rounded-xl font-medium transition inline-block">
+                <h2 class="text-xl font-semibold mb-3">Welcome to Collaborative Checklists</h2>
+                <p class="text-xs text-gray-500 dark:text-gray-400 mb-4">Sign in with your Google account to manage and share your lists.</p>
+                <a href="/auth/login" class="bg-blue-600 hover:bg-blue-700 text-white px-5 py-2.5 rounded-xl text-xs font-medium transition inline-block">
                     Sign in with Google
                 </a>
             </div>
@@ -164,21 +160,21 @@
 
         <!-- New List Modal -->
         <div x-show="showNewListModal" class="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
-            <div class="bg-white dark:bg-gray-800 rounded-xl max-w-md w-full p-6 border border-gray-200 dark:border-gray-700">
-                <h3 class="text-lg font-semibold mb-4">Create New Checklist</h3>
+            <div class="bg-white dark:bg-gray-800 rounded-xl max-w-md w-full p-5 border border-gray-200 dark:border-gray-700">
+                <h3 class="text-base font-semibold mb-3">Create New Checklist</h3>
                 <form @submit.prevent="createList">
-                    <div class="mb-4">
-                        <label class="block text-sm font-medium mb-1">List Title</label>
+                    <div class="mb-3">
+                        <label class="block text-xs font-medium mb-1">List Title</label>
                         <input type="text" x-model="newListTitle" required placeholder="e.g. Daily Chores" 
-                               class="w-full bg-gray-50 dark:bg-gray-900 border border-gray-300 dark:border-gray-700 rounded-lg px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                               class="w-full bg-gray-50 dark:bg-gray-900 border border-gray-300 dark:border-gray-700 rounded-lg px-3 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-blue-500">
                     </div>
-                    <div class="mb-6 flex items-center space-x-2">
+                    <div class="mb-4 flex items-center space-x-2">
                         <input type="checkbox" id="resettable" x-model="newListResettable" class="w-4 h-4 text-blue-600 rounded focus:ring-blue-500">
-                        <label for="resettable" class="text-sm font-medium">Enable Manual Reset Button (Great for Daily Tasks)</label>
+                        <label for="resettable" class="text-xs font-medium">Enable Manual Reset Button (Great for Daily Tasks)</label>
                     </div>
-                    <div class="flex justify-end space-x-3">
-                        <button type="button" @click="showNewListModal = false" class="px-4 py-2 rounded-lg text-sm font-medium bg-gray-200 dark:bg-gray-700 hover:bg-gray-300 dark:hover:bg-gray-600">Cancel</button>
-                        <button type="submit" class="px-4 py-2 rounded-lg text-sm font-medium bg-blue-600 hover:bg-blue-700 text-white">Create</button>
+                    <div class="flex justify-end space-x-2">
+                        <button type="button" @click="showNewListModal = false" class="px-3 py-1.5 rounded-lg text-xs font-medium bg-gray-200 dark:bg-gray-700 hover:bg-gray-300 dark:hover:bg-gray-600">Cancel</button>
+                        <button type="submit" class="px-3 py-1.5 rounded-lg text-xs font-medium bg-blue-600 hover:bg-blue-700 text-white">Create</button>
                     </div>
                 </form>
             </div>
@@ -307,12 +303,10 @@
                     let targetIndex = direction === 'up' ? index - 1 : index + 1;
                     if (targetIndex < 0 || targetIndex >= pending.length) return;
 
-                    // Swap in pending array
                     let temp = pending[index];
                     pending[index] = pending[targetIndex];
                     pending[targetIndex] = temp;
 
-                    // Reconstruct full task array order (pending rearranged + completed untouched)
                     let newTasks = [...pending, ...this.completedTasks];
                     this.tasks = newTasks;
 
