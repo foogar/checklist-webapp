@@ -19,7 +19,10 @@
     <div class="max-w-4xl mx-auto px-4 py-4 sm:py-8">
         <!-- Header -->
         <header class="flex justify-between items-center mb-4 pb-3 border-b border-gray-200 dark:border-gray-800">
-            <h1 class="text-xl font-bold tracking-tight">Checklists</h1>
+            <!-- Checklists link triggers List Overview -->
+            <button @click="showOverview()" class="text-xl font-bold tracking-tight hover:text-blue-600 dark:hover:text-blue-400 transition">
+                Checklists
+            </button>
             
             <div class="flex items-center space-x-3">
                 <!-- Dark Mode Toggle -->
@@ -49,6 +52,14 @@
                 <!-- Tabs & New List Button Row -->
                 <div class="mb-4 flex items-center justify-between gap-2 overflow-x-auto pb-2 border-b border-gray-200 dark:border-gray-800">
                     <div class="flex items-center gap-2 flex-nowrap">
+                        <!-- All Lists Overview Button -->
+                        <button @click="showOverview()"
+                                :class="!activeList ? 'bg-blue-600 text-white' : 'bg-gray-200 dark:bg-gray-800 text-gray-700 dark:text-gray-300 hover:bg-gray-300 dark:hover:bg-gray-700'"
+                                class="px-3 py-1.5 rounded-lg text-xs font-medium transition flex items-center space-x-1 whitespace-nowrap">
+                            <span>☰ All Lists</span>
+                        </button>
+
+                        <!-- Individual List Tabs -->
                         <template x-for="list in lists" :key="list.id">
                             <button @click="selectList(list)"
                                     :class="activeList && activeList.id === list.id ? 'bg-blue-600 text-white' : 'bg-gray-200 dark:bg-gray-800 text-gray-700 dark:text-gray-300 hover:bg-gray-300 dark:hover:bg-gray-700'"
@@ -65,7 +76,35 @@
                     </button>
                 </div>
 
-                <!-- Active List Workspace -->
+                <!-- OVERVIEW DASHBOARD VIEW (Shown when no active list is selected) -->
+                <template x-if="!activeList">
+                    <div class="space-y-4">
+                        <div class="flex justify-between items-center">
+                            <h2 class="text-sm font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider">Your Checklists</h2>
+                        </div>
+
+                        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3" x-show="lists.length > 0">
+                            <template x-for="list in lists" :key="list.id">
+                                <div @click="selectList(list)" class="cursor-pointer bg-white dark:bg-gray-800 rounded-xl shadow-sm border border-gray-200 dark:border-gray-700 p-4 hover:border-blue-500 dark:hover:border-blue-500 transition">
+                                    <div class="flex justify-between items-start mb-2">
+                                        <h3 class="font-medium text-sm text-gray-900 dark:text-gray-100" x-text="list.title"></h3>
+                                        <span x-show="list.is_resettable" class="text-[10px] px-2 py-0.5 bg-amber-100 dark:bg-amber-900/50 text-amber-700 dark:text-amber-300 rounded-full">Reset</span>
+                                    </div>
+                                    <div class="flex justify-between items-center text-xs text-gray-500 dark:text-gray-400">
+                                        <span x-text="list.owner_name && list.owner_name !== user.name ? 'Shared by ' + list.owner_name : 'Owner: You'"></span>
+                                        <span class="text-blue-600 dark:text-blue-400 font-medium">Open →</span>
+                                    </div>
+                                </div>
+                            </template>
+                        </div>
+
+                        <div x-show="lists.length === 0" class="text-center py-12 text-gray-500 text-xs">
+                            <p>No checklists found. Click "+ New" to create your first list!</p>
+                        </div>
+                    </div>
+                </template>
+
+                <!-- ACTIVE LIST WORKSPACE VIEW -->
                 <template x-if="activeList">
                     <div class="bg-white dark:bg-gray-800 rounded-xl shadow-sm border border-gray-200 dark:border-gray-700 p-4">
                         <div class="flex justify-between items-center mb-3">
@@ -139,12 +178,6 @@
                         </template>
                     </div>
                 </template>
-
-                <template x-if="!activeList && lists.length === 0">
-                    <div class="text-center py-12 text-gray-500 text-xs">
-                        <p>No checklists found. Create your first list to get started!</p>
-                    </div>
-                </template>
             </div>
         </template>
 
@@ -206,15 +239,16 @@
                     }
                 },
 
+                showOverview() {
+                    this.activeList = null;
+                    this.tasks = [];
+                },
+
                 async fetchLists() {
                     const res = await fetch('/api/lists');
                     if (res.ok) {
                         this.lists = await res.json();
-                        if (this.lists.length > 0 && !this.activeList) {
-                            this.selectList(this.lists[0]);
-                        } else if (this.activeList) {
-                            this.activeList = this.lists.find(l => l.id === this.activeList.id) || this.lists[0] || null;
-                        }
+                        // Defaults to overview view (activeList = null)
                     }
                 },
 
@@ -252,8 +286,7 @@
                     const res = await fetch(`/api/lists/${id}`, { method: 'DELETE' });
                     if (res.ok) {
                         this.lists = this.lists.filter(l => l.id !== id);
-                        this.activeList = this.lists.length > 0 ? this.lists[0] : null;
-                        if (this.activeList) await this.fetchTasks();
+                        this.showOverview();
                     }
                 },
 
