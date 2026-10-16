@@ -5,6 +5,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from authlib.integrations.starlette_client import OAuth
 from starlette.middleware.sessions import SessionMiddleware
+from starlette.middleware.proxy_headers import ProxyHeadersMiddleware
 from pydantic import BaseModel
 import sqlite3
 
@@ -14,6 +15,9 @@ from database import get_db, init_db
 init_db()
 
 app = FastAPI(title="AI Checklist Webapp")
+
+# Trust proxy headers from Cloudflare Tunnel
+app.add_middleware(ProxyHeadersMiddleware, trusted_hosts="*")
 
 # Secure session middleware (Secret key should ideally come from an env variable)
 app.add_middleware(SessionMiddleware, secret_key=os.getenv("SESSION_SECRET", "super-secret-homelab-key"))
