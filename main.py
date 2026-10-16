@@ -41,6 +41,9 @@ class TaskCreate(BaseModel):
 class ShareRequest(BaseModel):
     email: str
 
+class ReorderRequest(BaseModel):
+    task_ids: list[int]
+
 # --- Helper: Get Current User from Session ---
 def get_current_user(request: Request):
     user = request.session.get('user')
@@ -251,6 +254,54 @@ async def reset_list(list_id: int, request: Request):
         raise HTTPException(status_code=403, detail="Only list owner can reset daily tasks")
 
     cursor.execute("UPDATE tasks SET status = 'pending' WHERE list_id = ?", (list_id,))
+    conn.commit()
+    conn.close()
+    return {"success": True}
+
+@app.post('/api/lists/{list_id}/share')
+async def share_list(list_id: int, payload: ShareRequest, request: Request):
+    user = get_current_user(request)
+    conn = sqlite3.connect("checklist.db")
+    cursor = conn.cursor()
+    
+    # Verify owner access
+    cursor.execute("SELECT 1 FROM lists WHERE id = ? AND user_id = ?", (list_id, user['id']))
+    if not cursor.fetchone():
+        conn.close()
+        raise HTTPException(status_code=403, detail="Only list owner can share this list")
+    
+    # Find user by email (they must have logged in at least once)
+    cursor.execute("SELECT id FROM users WHERE email = ?", (payload.email,))
+    target_user = cursor.fetchone()
+    if not target_user:
+        conn.close()
+        raise HTTPException(status_code=404, detail="User not found. They must log into the app first.")
+    
+    target_user_id = target_user[0]
+    cursor.execute("INSERT OR IGNORE INTO list_shares (list_id, user_id) VALUES (?, ?)", (list_id, target_user_id))
+    conn.commit()
+    conn.close()
+    return {"success": True}
+
+@app.post('/api/lists/{list_id}/reorder')
+async def reorder_tasks(list_id: int, payload: ReorderRequest, request: Request):
+    user = get_current_user(request)
+    conn = sqlite3.connect("checklist.db")
+    cursor = conn.cursor()
+    
+    # Verify access (owner or shared)
+    cursor.execute("""
+        SELECT 1 FROM lists l 
+        LEFT JOIN list_shares ls ON l.id = ls.list_id 
+        WHERE l.id = ? AND (l.user_id = ? OR ls.user_id = ?)
+    """, (list_id, user['id'], user['id']))
+    if not cursor.fetchone():
+        conn.close()
+        raise HTTPException(status_code=403, detail="Access denied")
+    
+    # Update task positions based on array index
+    for index, task_id in enumerate(payload.task_ids):
+        cursor.execute("UPDATE tasks SET position = ? WHERE id = ? AND list_id = ?", (index, task_id, list_id))
     conn.commit()
     conn.close()
     return {"success": True}
