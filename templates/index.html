@@ -93,13 +93,20 @@
 
                         <!-- Pending Tasks -->
                         <div class="space-y-2 mb-6">
-                            <template x-for="task in pendingTasks" :key="task.id">
+                            <template x-for="(task, index) in pendingTasks" :key="task.id">
                                 <div class="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-900/50 rounded-lg border border-gray-200 dark:border-gray-800">
                                     <label class="flex items-center space-x-3 cursor-pointer flex-1">
                                         <input type="checkbox" @change="toggleTaskStatus(task)" class="w-4 h-4 text-blue-600 rounded focus:ring-blue-500">
                                         <span class="text-sm" x-text="task.title"></span>
                                     </label>
-                                    <button @click="deleteTask(task.id)" class="text-gray-400 hover:text-red-600 dark:hover:text-red-400 text-sm">×</button>
+                                    <div class="flex items-center space-x-2">
+                                        <!-- Reorder Buttons -->
+                                        <div class="flex space-x-1">
+                                            <button type="button" @click="moveTask(index, 'up')" class="text-xs px-2 py-1 bg-gray-200 dark:bg-gray-700 rounded hover:bg-gray-300 dark:hover:bg-gray-600">▲</button>
+                                            <button type="button" @click="moveTask(index, 'down')" class="text-xs px-2 py-1 bg-gray-200 dark:bg-gray-700 rounded hover:bg-gray-300 dark:hover:bg-gray-600">▼</button>
+                                        </div>
+                                        <button @click="deleteTask(task.id)" class="text-gray-400 hover:text-red-600 dark:hover:text-red-400 text-sm ml-2">×</button>
+                                    </div>
                                 </div>
                             </template>
                             <p x-show="pendingTasks.length === 0" class="text-sm text-gray-400 text-center py-4">No active tasks.</p>
@@ -119,6 +126,18 @@
                                             <button @click="deleteTask(task.id)" class="text-gray-400 hover:text-red-600 dark:hover:text-red-400 text-sm">×</button>
                                         </div>
                                     </template>
+                                </div>
+                            </div>
+                        </template>
+
+                        <!-- Share List Section (Owner Only) -->
+                        <template x-if="activeList.user_id === user.id">
+                            <div class="mt-6 pt-4 border-t border-gray-200 dark:border-gray-700">
+                                <h3 class="text-sm font-semibold mb-2">Share this List</h3>
+                                <div class="flex space-x-2">
+                                    <input type="email" x-model="shareEmail" placeholder="friend@example.com" 
+                                           class="flex-1 bg-gray-50 dark:bg-gray-900 border border-gray-300 dark:border-gray-700 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                                    <button @click="shareList()" class="px-4 py-1.5 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition">Share</button>
                                 </div>
                             </div>
                         </template>
@@ -175,6 +194,7 @@
                 activeList: null,
                 tasks: [],
                 newTaskTitle: '',
+                shareEmail: '',
                 showNewListModal: false,
                 newListTitle: '',
                 newListResettable: false,
@@ -197,7 +217,6 @@
                         if (this.lists.length > 0 && !this.activeList) {
                             this.selectList(this.lists[0]);
                         } else if (this.activeList) {
-                            // Keep active list reference updated
                             this.activeList = this.lists.find(l => l.id === this.activeList.id) || this.lists[0] || null;
                         }
                     }
@@ -280,6 +299,44 @@
                     const res = await fetch(`/api/lists/${this.activeList.id}/reset`, { method: 'POST' });
                     if (res.ok) {
                         await this.fetchTasks();
+                    }
+                },
+
+                async moveTask(index, direction) {
+                    let pending = this.pendingTasks;
+                    let targetIndex = direction === 'up' ? index - 1 : index + 1;
+                    if (targetIndex < 0 || targetIndex >= pending.length) return;
+
+                    // Swap in pending array
+                    let temp = pending[index];
+                    pending[index] = pending[targetIndex];
+                    pending[targetIndex] = temp;
+
+                    // Reconstruct full task array order (pending rearranged + completed untouched)
+                    let newTasks = [...pending, ...this.completedTasks];
+                    this.tasks = newTasks;
+
+                    let task_ids = this.tasks.map(t => t.id);
+                    await fetch(`/api/lists/${this.activeList.id}/reorder`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ task_ids })
+                    });
+                },
+
+                async shareList() {
+                    if (!this.shareEmail.trim()) return;
+                    const res = await fetch(`/api/lists/${this.activeList.id}/share`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ email: this.shareEmail })
+                    });
+                    if (res.ok) {
+                        alert('List shared successfully!');
+                        this.shareEmail = '';
+                    } else {
+                        const err = await res.json();
+                        alert(err.detail || 'Failed to share list');
                     }
                 },
 
