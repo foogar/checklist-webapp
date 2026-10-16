@@ -108,9 +108,9 @@ async def get_lists(request: Request):
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     
-    # Fetch owned lists + shared lists
+# Fetch owned lists + shared lists (now including is_resettable!)
     cursor.execute("""
-        SELECT DISTINCT l.id, l.title, l.user_id, u.name as owner_name 
+        SELECT DISTINCT l.id, l.title, l.user_id, l.is_resettable, u.name as owner_name 
         FROM lists l
         JOIN users u ON l.user_id = u.id
         LEFT JOIN list_shares ls ON l.id = ls.list_id
