@@ -16,7 +16,6 @@ def init_db():
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     
-    # Users table (populated via Google OAuth)
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS users (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -26,18 +25,18 @@ def init_db():
     );
     """)
 
-    # Lists table
+    # Added is_resettable flag for manual daily list behavior
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS lists (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         user_id INTEGER NOT NULL,
         title TEXT NOT NULL,
+        is_resettable BOOLEAN DEFAULT 0,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
     );
     """)
 
-    # List sharing table for collaboration
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS list_shares (
         list_id INTEGER NOT NULL,
@@ -48,7 +47,6 @@ def init_db():
     );
     """)
 
-    # Tasks table
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS tasks (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
