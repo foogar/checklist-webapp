@@ -15,6 +15,9 @@ init_db()
 
 app = FastAPI(title="AI Checklist Webapp")
 
+# Mount the static directory so FastAPI can serve images, CSS, etc.
+app.mount("/static", StaticFiles(directory="static"), name="static")
+
 # Secure session middleware (Secret key should ideally come from an env variable)
 app.add_middleware(SessionMiddleware, secret_key=os.getenv("SESSION_SECRET", "super-secret-homelab-key"))
 
