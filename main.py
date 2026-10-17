@@ -13,8 +13,9 @@ from authlib.integrations.starlette_client import OAuth
 from starlette.middleware.sessions import SessionMiddleware
 from pydantic import BaseModel
 import sqlite3
+from typing import Literal
 
-from database import get_db, init_db
+from database import connect, init_db
 
 # Initialize database on startup
 init_db()
@@ -48,7 +49,18 @@ if len(SESSION_SECRET) < 32:
         f"SESSION_SECRET must be at least 32 characters (got {len(SESSION_SECRET)})."
     )
 
-app.add_middleware(SessionMiddleware, secret_key=SESSION_SECRET)
+# Set SESSION_COOKIE_SECURE=1 once the app is served over HTTPS. Without it
+# the browser will still send the session cookie over plain HTTP, which on a
+# LAN-reachable deployment (e.g. uvicorn --host 0.0.0.0) exposes it in cleartext.
+SESSION_COOKIE_SECURE = os.getenv("SESSION_COOKIE_SECURE", "0").strip().lower() in {
+    "1", "true", "yes", "on",
+}
+
+app.add_middleware(
+    SessionMiddleware,
+    secret_key=SESSION_SECRET,
+    https_only=SESSION_COOKIE_SECURE,
+)
 
 # OAuth Setup
 oauth = OAuth()
@@ -72,6 +84,10 @@ class TaskCreate(BaseModel):
 
 class ShareRequest(BaseModel):
     email: str
+
+class TaskStatusUpdate(BaseModel):
+    # Validated by pydantic, so a malformed body yields 422 rather than a 500.
+    status: Literal['pending', 'completed']
 
 class ReorderRequest(BaseModel):
     task_ids: list[int]
@@ -100,7 +116,7 @@ async def auth_callback(request: Request):
     name = user_info.get('name', email)
 
     # Upsert user into database
-    conn = sqlite3.connect("checklist.db")
+    conn = connect()
     cursor = conn.cursor()
     cursor.execute("SELECT id FROM users WHERE email = ?", (email,))
     row = cursor.fetchone()
@@ -161,8 +177,7 @@ async def index(request: Request):
 @app.get('/api/lists')
 async def get_lists(request: Request):
     user = get_current_user(request)
-    conn = sqlite3.connect("checklist.db")
-    conn.row_factory = sqlite3.Row
+    conn = connect()
     cursor = conn.cursor()
     
 # Fetch owned lists + shared lists (now including is_resettable!)
@@ -182,7 +197,7 @@ async def get_lists(request: Request):
 @app.post('/api/lists')
 async def create_list(payload: ListCreate, request: Request):
     user = get_current_user(request)
-    conn = sqlite3.connect("checklist.db")
+    conn = connect()
     cursor = conn.cursor()
     cursor.execute("INSERT INTO lists (user_id, title, is_resettable) VALUES (?, ?, ?)", (user['id'], payload.title, 1 if payload.is_resettable else 0))
     conn.commit()
@@ -193,20 +208,26 @@ async def create_list(payload: ListCreate, request: Request):
 @app.delete('/api/lists/{list_id}')
 async def delete_list(list_id: int, request: Request):
     user = get_current_user(request)
-    conn = sqlite3.connect("checklist.db")
+    conn = connect()
     cursor = conn.cursor()
     # Ensure user owns the list
     cursor.execute("DELETE FROM lists WHERE id = ? AND user_id = ?", (list_id, user['id']))
     conn.commit()
+    # The ownership filter makes a non-matching delete a no-op. Without this
+    # check the endpoint reports success even when nothing was removed, so a
+    # caller is told a list is gone while it still exists. 404 is used for both
+    # "no such list" and "not yours" so ownership cannot be probed.
+    deleted = cursor.rowcount
     conn.close()
+    if deleted == 0:
+        raise HTTPException(status_code=404, detail="List not found")
     return {"success": True}
 
 # --- API: Tasks ---
 @app.get('/api/lists/{list_id}/tasks')
 async def get_tasks(list_id: int, request: Request):
     user = get_current_user(request)
-    conn = sqlite3.connect("checklist.db")
-    conn.row_factory = sqlite3.Row
+    conn = connect()
     cursor = conn.cursor()
     
     # Verify access (owner or shared)
@@ -228,7 +249,7 @@ async def get_tasks(list_id: int, request: Request):
 @app.post('/api/lists/{list_id}/tasks')
 async def create_task(list_id: int, payload: TaskCreate, request: Request):
     user = get_current_user(request)
-    conn = sqlite3.connect("checklist.db")
+    conn = connect()
     cursor = conn.cursor()
     
     # Verify access
@@ -248,15 +269,11 @@ async def create_task(list_id: int, payload: TaskCreate, request: Request):
     return {"id": task_id, "title": payload.title, "status": "pending"}
 
 @app.patch('/api/tasks/{task_id}')
-async def update_task_status(task_id: int, request: Request):
+async def update_task_status(task_id: int, payload: TaskStatusUpdate, request: Request):
     user = get_current_user(request)
-    data = await request.json()
-    new_status = data.get('status')
-    
-    if new_status not in ['pending', 'completed']:
-        raise HTTPException(status_code=400, detail="Invalid status")
+    new_status = payload.status
         
-    conn = sqlite3.connect("checklist.db")
+    conn = connect()
     cursor = conn.cursor()
     
     # Verify user has access to the list containing this task via ownership or share
@@ -279,7 +296,7 @@ async def update_task_status(task_id: int, request: Request):
 @app.delete('/api/tasks/{task_id}')
 async def delete_task(task_id: int, request: Request):
     user = get_current_user(request)
-    conn = sqlite3.connect("checklist.db")
+    conn = connect()
     cursor = conn.cursor()
     
     cursor.execute("""
@@ -301,7 +318,7 @@ async def delete_task(task_id: int, request: Request):
 @app.post('/api/lists/{list_id}/reset')
 async def reset_list(list_id: int, request: Request):
     user = get_current_user(request)
-    conn = sqlite3.connect("checklist.db")
+    conn = connect()
     cursor = conn.cursor()
     
     # Verify owner access for resetting
@@ -318,7 +335,7 @@ async def reset_list(list_id: int, request: Request):
 @app.post('/api/lists/{list_id}/share')
 async def share_list(list_id: int, payload: ShareRequest, request: Request):
     user = get_current_user(request)
-    conn = sqlite3.connect("checklist.db")
+    conn = connect()
     cursor = conn.cursor()
     
     # Verify owner access
@@ -343,7 +360,7 @@ async def share_list(list_id: int, payload: ShareRequest, request: Request):
 @app.post('/api/lists/{list_id}/reorder')
 async def reorder_tasks(list_id: int, payload: ReorderRequest, request: Request):
     user = get_current_user(request)
-    conn = sqlite3.connect("checklist.db")
+    conn = connect()
     cursor = conn.cursor()
     
     # Verify access (owner or shared)

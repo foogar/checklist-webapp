@@ -3,17 +3,28 @@ import os
 
 DB_FILE = "checklist.db"
 
-def get_db():
+def connect():
+    """Open a connection with the pragmas this app depends on.
+
+    SQLite ignores foreign keys unless they are enabled per connection, so
+    without the PRAGMA below every ON DELETE CASCADE in the schema is a
+    silent no-op and deleting a list leaves orphaned tasks and shares.
+    """
     conn = sqlite3.connect(DB_FILE)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL;")
+    conn.execute("PRAGMA foreign_keys=ON;")
+    return conn
+
+def get_db():
+    conn = connect()
     try:
         yield conn
     finally:
         conn.close()
 
 def init_db():
-    conn = sqlite3.connect(DB_FILE)
+    conn = connect()
     cursor = conn.cursor()
     
     cursor.execute("""
