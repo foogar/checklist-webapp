@@ -13,6 +13,7 @@ from authlib.integrations.starlette_client import OAuth
 from starlette.middleware.sessions import SessionMiddleware
 from pydantic import BaseModel
 import sqlite3
+import sys
 from typing import Literal
 
 from database import connect, init_db
@@ -99,6 +100,49 @@ def get_current_user(request: Request):
         raise HTTPException(status_code=401, detail="Not authenticated")
     return user
 
+def upsert_user(email, name):
+    """Find or create a user by email. Shared by the OAuth callback and the
+    development login so both populate the database identically."""
+    conn = connect()
+    cursor = conn.cursor()
+    cursor.execute("SELECT id FROM users WHERE email = ?", (email,))
+    row = cursor.fetchone()
+    if not row:
+        cursor.execute("INSERT INTO users (email, name) VALUES (?, ?)", (email, name))
+        conn.commit()
+        user_id = cursor.lastrowid
+    else:
+        user_id = row[0]
+    conn.close()
+    return user_id
+
+
+def start_session(request, user_id, email, name):
+    request.session['user'] = {
+        'id': user_id,
+        'email': email,
+        'name': name
+    }
+
+
+# Development login bypass. Off unless explicitly enabled, and the route is a
+# 404 while off so it cannot be discovered. It exists so the app can be driven
+# and tested without a Google round trip; it must never be enabled on a
+# deployment other people can reach.
+DEV_AUTH_ENABLED = os.getenv("DEV_AUTH_ENABLED", "0").strip().lower() in {
+    "1", "true", "yes", "on",
+}
+
+if DEV_AUTH_ENABLED:
+    print(
+        "\n"
+        "  *** DEV_AUTH_ENABLED is ON ***\n"
+        "  /auth/dev-login can sign you in as ANY email address, with no\n"
+        "  password and no Google check. Never enable this on a deployment\n"
+        "  reachable by anyone else.\n",
+        file=sys.stderr,
+    )
+
 # --- Auth Routes ---
 @app.route('/auth/login')
 async def login(request: Request):
@@ -111,30 +155,30 @@ async def auth_callback(request: Request):
     user_info = token.get('userinfo')
     if not user_info:
         raise HTTPException(status_code=400, detail="Google authentication failed")
-    
+
     email = user_info['email']
     name = user_info.get('name', email)
 
-    # Upsert user into database
-    conn = connect()
-    cursor = conn.cursor()
-    cursor.execute("SELECT id FROM users WHERE email = ?", (email,))
-    row = cursor.fetchone()
-    
-    if not row:
-        cursor.execute("INSERT INTO users (email, name) VALUES (?, ?)", (email, name))
-        conn.commit()
-        user_id = cursor.lastrowid
-    else:
-        user_id = row[0]
-    conn.close()
+    user_id = upsert_user(email, name)
+    start_session(request, user_id, email, name)
+    return RedirectResponse(url='/', status_code=303)
 
-    # Save session data
-    request.session['user'] = {
-        'id': user_id,
-        'email': email,
-        'name': name
-    }
+@app.get('/auth/dev-login')
+async def dev_login(request: Request, email: str = "dev@localhost"):
+    """Log in as an arbitrary email for local testing.
+
+    Populates the same rows as the OAuth callback, so lists, shares, and tasks
+    behave identically. Returns 404 unless DEV_AUTH_ENABLED is set.
+    """
+    if not DEV_AUTH_ENABLED:
+        raise HTTPException(status_code=404, detail="Not found")
+
+    email = email.strip().lower()
+    if not email or "@" not in email:
+        raise HTTPException(status_code=400, detail="A valid email is required")
+
+    user_id = upsert_user(email, email.split("@")[0])
+    start_session(request, user_id, email, email.split("@")[0])
     return RedirectResponse(url='/', status_code=303)
 
 @app.get('/auth/logout')

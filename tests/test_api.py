@@ -94,6 +94,13 @@ def main() -> int:
         403,
     )
 
+    print("== development login is inert unless explicitly enabled ==")
+    check(
+        "/auth/dev-login is 404 when DEV_AUTH_ENABLED is off",
+        owner.get("/auth/dev-login").status_code,
+        404,
+    )
+
     print("== body validation ==")
     check(
         "PATCH invalid status value",

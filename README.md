@@ -34,3 +34,20 @@ Covers authentication, per-list access control, request validation, and
 database cascade behaviour. Runs against a temporary copy of the database, so
 it never touches your real `checklist.db`.
 
+## Testing without Google OAuth
+Set `DEV_AUTH_ENABLED=1` in `.env` to enable `/auth/dev-login`, which signs you
+in as any email address:
+
+```
+http://localhost:8000/auth/dev-login?email=you@example.com
+```
+
+It creates the same `users` row the OAuth callback would, so lists, shares, and
+tasks behave exactly as they do in normal use. This is useful for testing on a
+phone or offline, where a Google round trip is inconvenient.
+
+While disabled the route returns 404, so it cannot be reached by accident, and
+the app prints a warning at startup whenever it is on. **Never enable it on a
+deployment anyone else can reach** — it grants access to any account with no
+password.
+
