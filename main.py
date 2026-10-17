@@ -1,4 +1,10 @@
 import os
+from dotenv import load_dotenv
+
+# Load environment variables from a .env file if present
+load_dotenv()
+
+# ... (rest of the imports and code)
 from fastapi import FastAPI, Depends, HTTPException, Request, Response, status
 from fastapi.responses import RedirectResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
