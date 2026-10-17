@@ -24,8 +24,31 @@ app = FastAPI(title="AI Checklist Webapp")
 # Mount the static directory so FastAPI can serve images, CSS, etc.
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
-# Secure session middleware (Secret key should ideally come from an env variable)
-app.add_middleware(SessionMiddleware, secret_key=os.getenv("SESSION_SECRET", "super-secret-homelab-key"))
+# Secure session middleware
+# Fail closed: an unset, empty, or known-weak SESSION_SECRET must stop the app
+# rather than fall back to a hardcoded key, which is public in the repository.
+INSECURE_SECRETS = {
+    "change_me_to_something_super_secure",
+    "super-secret-homelab-key",
+    "change_me",
+    "changeme",
+    "secret",
+}
+
+SESSION_SECRET = os.getenv("SESSION_SECRET")
+if not SESSION_SECRET:
+    raise RuntimeError("SESSION_SECRET must be set in .env")
+if SESSION_SECRET.strip().lower() in INSECURE_SECRETS:
+    raise RuntimeError(
+        "SESSION_SECRET is a known placeholder. Generate a real one with: "
+        'python -c "import secrets; print(secrets.token_urlsafe(48))"'
+    )
+if len(SESSION_SECRET) < 32:
+    raise RuntimeError(
+        f"SESSION_SECRET must be at least 32 characters (got {len(SESSION_SECRET)})."
+    )
+
+app.add_middleware(SessionMiddleware, secret_key=SESSION_SECRET)
 
 # OAuth Setup
 oauth = OAuth()
