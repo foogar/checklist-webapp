@@ -220,21 +220,13 @@ __marimo__/
 .streamlit/secrets.toml
 
 # Database
-*.db
-*.sqlite
-*.sqlite3
-# SQLite sidecar files. The pattern '*.db' does not match these, because they
-# end in -wal/-shm rather than .db. In WAL mode the -wal file holds recent
-# uncommitted pages, so it can contain real task and account data.
-*.db-wal
-*.db-shm
-*.db-journal
-*.sqlite-wal
-*.sqlite-shm
-*.sqlite-journal
-*.sqlite3-wal
-*.sqlite3-shm
-*.sqlite3-journal
+# The trailing * is deliberate: it covers checklist.db, the WAL sidecars
+# (checklist.db-wal, -shm, -journal) and any stray backup such as
+# checklist.db.backup-2026-10-17. Each of those can contain real data, and a
+# narrow pattern like *.db silently misses the others.
+*.db*
+*.sqlite*
+*.sqlite3*
 
 # IDE / OS
 .DS_Store
