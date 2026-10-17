@@ -230,6 +230,36 @@ def main() -> int:
           any(e["email"] == "mixedcase@test.local" and e["status"] == "confirmed"
               for e in owner.get(f"/api/lists/{list_id}/shares").json()), True)
 
+    print("== emails differing only by case are the same account ==")
+    legacy = main.connect()
+    legacy.execute("INSERT INTO users (email,name) VALUES ('MixedCase@Legacy.Local','Legacy')")
+    legacy.commit()
+    legacy_id = legacy.execute(
+        "SELECT id FROM users WHERE LOWER(email) = ?", ("mixedcase@legacy.local",)
+    ).fetchone()[0]
+    legacy.close()
+    check("signing in with different case reuses the existing account",
+          main.upsert_user("MIXEDCASE@legacy.local", "Legacy"), legacy_id)
+    check("no duplicate row was created",
+          main.connect().execute(
+              "SELECT COUNT(*) FROM users WHERE LOWER(email) = ?",
+              ("mixedcase@legacy.local",)).fetchone()[0], 1)
+    check("sharing with a differently-cased address finds the user",
+          owner.post(f"/api/lists/{list_id}/share",
+                     json={"email": "MIXEDCASE@LEGACY.LOCAL"}).json()["status"], "shared")
+
+    print("== input length limits ==")
+    check("oversized task title is rejected",
+          owner.post(f"/api/lists/{list_id}/tasks", json={"title": "A" * 501}).status_code, 422)
+    check("oversized list title is rejected",
+          owner.post("/api/lists", json={"title": "B" * 201}).status_code, 422)
+    check("empty title is rejected",
+          owner.post(f"/api/lists/{list_id}/tasks", json={"title": ""}).status_code, 422)
+    check("a normal title still works",
+          owner.post(f"/api/lists/{list_id}/tasks", json={"title": "Eggs"}).status_code, 200)
+    check("oversized share email is rejected",
+          owner.post(f"/api/lists/{list_id}/share", json={"email": "x" * 300}).status_code, 422)
+
     print("== body validation ==")
     check(
         "PATCH invalid status value",
@@ -252,7 +282,7 @@ def main() -> int:
         "SELECT COUNT(*) FROM tasks WHERE list_id = ?", (list_id,)
     ).fetchone()[0]
     conn.close()
-    check("task existed before delete", before, 1)
+    check("tasks existed before delete", before >= 1, True)
 
     owner.delete(f"/api/lists/{list_id}")
 

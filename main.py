@@ -5,14 +5,13 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # ... (rest of the imports and code)
-from fastapi import FastAPI, Depends, HTTPException, Request, Response, status
-from fastapi.responses import RedirectResponse, JSONResponse
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from authlib.integrations.starlette_client import OAuth
 from starlette.middleware.sessions import SessionMiddleware
-from pydantic import BaseModel
-import sqlite3
+from pydantic import BaseModel, Field
 import sys
 from typing import Literal
 
@@ -76,18 +75,20 @@ oauth.register(
 templates = Jinja2Templates(directory=BASE_DIR / "templates")
 
 # --- Pydantic Models ---
+# Length caps stop a single request from writing an arbitrarily large blob into
+# the database; without them any task title is accepted at any size.
 class ListCreate(BaseModel):
-    title: str
+    title: str = Field(min_length=1, max_length=200)
     is_resettable: bool = False
 
 class TaskCreate(BaseModel):
-    title: str
+    title: str = Field(min_length=1, max_length=500)
 
 class ShareRequest(BaseModel):
-    email: str
+    email: str = Field(min_length=3, max_length=254)
 
 class RevokeShareRequest(BaseModel):
-    email: str
+    email: str = Field(min_length=3, max_length=254)
 
 class TaskStatusUpdate(BaseModel):
     # Validated by pydantic, so a malformed body yields 422 rather than a 500.
@@ -112,10 +113,10 @@ def claim_invites(conn, cursor, user_id, email):
     """
     cursor.execute("""
         INSERT OR IGNORE INTO list_shares (list_id, user_id)
-        SELECT list_id, ? FROM list_invites WHERE email = ?
+        SELECT list_id, ? FROM list_invites WHERE LOWER(email) = ?
     """, (user_id, email))
     claimed = cursor.rowcount
-    cursor.execute("DELETE FROM list_invites WHERE email = ?", (email,))
+    cursor.execute("DELETE FROM list_invites WHERE LOWER(email) = ?", (email,))
     conn.commit()
     return claimed
 
@@ -126,7 +127,7 @@ def upsert_user(email, name):
     email = email.strip().lower()
     conn = connect()
     cursor = conn.cursor()
-    cursor.execute("SELECT id FROM users WHERE email = ?", (email,))
+    cursor.execute("SELECT id FROM users WHERE LOWER(email) = ?", (email,))
     row = cursor.fetchone()
     if not row:
         cursor.execute("INSERT INTO users (email, name) VALUES (?, ?)", (email, name))
@@ -140,7 +141,6 @@ def upsert_user(email, name):
     claim_invites(conn, cursor, user_id, email)
     conn.close()
     return user_id
-
 
 def start_session(request, user_id, email, name):
     request.session['user'] = {
@@ -419,7 +419,7 @@ async def share_list(list_id: int, payload: ShareRequest, request: Request):
     # pending invite and is claimed when that address next signs in. Both return
     # the same status and shape, so this endpoint cannot be used to discover
     # which email addresses have accounts on this server.
-    cursor.execute("SELECT id FROM users WHERE email = ?", (email,))
+    cursor.execute("SELECT id FROM users WHERE LOWER(email) = ?", (email,))
     target = cursor.fetchone()
 
     if target:
@@ -496,7 +496,7 @@ async def revoke_list_share(list_id: int, payload: RevokeShareRequest, request: 
     cursor.execute("""
         DELETE FROM list_shares
         WHERE list_id = ?
-          AND user_id = (SELECT id FROM users WHERE email = ?)
+          AND user_id = (SELECT id FROM users WHERE LOWER(email) = ?)
     """, (list_id, email))
     revoked_shares = cursor.rowcount
     conn.commit()

@@ -114,6 +114,30 @@ def init_db():
     );
     """)
     
+    # SQLite compares TEXT with BINARY collation, so 'John@x.com' and
+    # 'john@x.com' are two different values as far as the UNIQUE constraint on
+    # users.email is concerned. Rows written before emails were normalised would
+    # therefore miss a case-insensitive lookup and produce a second, empty
+    # account for a returning user. Fold them to lowercase once, on startup.
+    cursor.execute("SELECT id, LOWER(email) FROM users WHERE email != LOWER(email)")
+    for row in cursor.fetchall():
+        try:
+            cursor.execute("UPDATE users SET email = ? WHERE id = ?", (row[1], row[0]))
+        except sqlite3.IntegrityError:
+            # Another row already holds the lowercase form. Merging them would
+            # mean guessing which one owns the lists, so leave both alone; the
+            # case-insensitive lookups still find the original.
+            pass
+
+    # Belt and braces against a case-variant duplicate appearing later. Skipped
+    # if genuine duplicates already exist, since the index cannot be built then.
+    try:
+        cursor.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email_nocase ON users(LOWER(email))"
+        )
+    except sqlite3.IntegrityError:
+        pass
+
     conn.commit()
     conn.close()
 
