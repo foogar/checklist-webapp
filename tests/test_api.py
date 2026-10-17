@@ -156,6 +156,26 @@ def main() -> int:
         404,
     )
 
+    print("== revocation while the sharee already has the list open ==")
+    owner.post(f"/api/lists/{list_id}/share", json={"email": "stranger@test.local"})
+    sharee_id = owner.get(f"/api/lists/{list_id}/shares").json()[0]["user_id"]
+    open_tasks = stranger.get(f"/api/lists/{list_id}/tasks")
+    check("sharee loads tasks before revocation", open_tasks.status_code, 200)
+    check("sharee sees the task title", open_tasks.json()[0]["title"], "Milk")
+
+    owner.delete(f"/api/lists/{list_id}/shares/{sharee_id}")
+
+    # Access is re-evaluated per request, so every fresh call is denied.
+    check("sharee cannot re-read the list", stranger.get(f"/api/lists/{list_id}/tasks").status_code, 403)
+    check("sharee cannot add a task",
+          stranger.post(f"/api/lists/{list_id}/tasks", json={"title": "sneaky"}).status_code, 403)
+    check("sharee cannot reorder",
+          stranger.post(f"/api/lists/{list_id}/reorder", json={"task_ids": [task_id]}).status_code, 403)
+    check("sharee cannot reset",
+          stranger.post(f"/api/lists/{list_id}/reset").status_code, 403)
+    check("the list is gone from the sharee's list view",
+          any(x["id"] == list_id for x in stranger.get("/api/lists").json()), False)
+
     print("== body validation ==")
     check(
         "PATCH invalid status value",
