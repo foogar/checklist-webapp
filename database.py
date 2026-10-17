@@ -1,7 +1,36 @@
 import sqlite3
 import os
+from pathlib import Path
 
-DB_FILE = "checklist.db"
+# Project root, derived from this file's location. Every other path in the app
+# is anchored here rather than to the process working directory, so the app
+# finds its database, templates, and static assets no matter where it was
+# launched from. A relative working directory is the normal state under a
+# service manager, a container, or an IDE, and it silently produced a second
+# empty database before this was made absolute.
+BASE_DIR = Path(__file__).resolve().parent
+
+
+def _resolve_db_path() -> Path:
+    """Absolute path to the SQLite file.
+
+    Defaults to checklist.db beside this module. Set DATABASE_PATH to place it
+    elsewhere, which is what you want for a mounted volume or a backup-friendly
+    directory on a real deployment. A relative override is resolved against
+    BASE_DIR so it means the same thing regardless of the working directory.
+    """
+    configured = os.getenv("DATABASE_PATH", "").strip()
+    path = Path(configured).expanduser() if configured else Path("checklist.db")
+    if not path.is_absolute():
+        path = BASE_DIR / path
+    # Only needed for an override that points somewhere new; the default's
+    # parent always exists. Without this, SQLite reports the unhelpful
+    # "unable to open database file" for a missing directory.
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+DB_FILE = str(_resolve_db_path())
 
 def connect():
     """Open a connection with the pragmas this app depends on.

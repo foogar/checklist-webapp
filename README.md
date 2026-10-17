@@ -26,6 +26,25 @@ A self-hosted, mobile-friendly collaborative checklist web application built wit
 5. Once served over HTTPS, set `SESSION_COOKIE_SECURE=1` in `.env` so the
    browser will not send the session cookie over plain HTTP.
 
+## Data location
+By default the SQLite database is `checklist.db` beside the application code,
+found relative to the application itself rather than the working directory, so
+it stays correct however the app is launched.
+
+Set `DATABASE_PATH` in `.env` to put it elsewhere. On a real deployment this is
+what you want, so the database lives on a persistent volume or in a directory
+you back up:
+
+```
+DATABASE_PATH=/var/lib/checklist/checklist.db
+```
+
+Backing up is a straight file copy of that single file. Stop the app first, or
+copy `checklist.db`, `checklist.db-wal`, and `checklist.db-shm` together, since
+SQLite runs in WAL mode. Never put the database in a cloud-synced folder or on
+a network share: WAL relies on sidecar files and memory-mapped access that do
+not survive either.
+
 ## Tests
 ```
 .\.venv\Scripts\python.exe tests\test_api.py

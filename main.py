@@ -16,7 +16,7 @@ import sqlite3
 import sys
 from typing import Literal
 
-from database import connect, init_db
+from database import BASE_DIR, connect, init_db
 
 # Initialize database on startup
 init_db()
@@ -24,7 +24,7 @@ init_db()
 app = FastAPI(title="AI Checklist Webapp")
 
 # Mount the static directory so FastAPI can serve images, CSS, etc.
-app.mount("/static", StaticFiles(directory="static"), name="static")
+app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
 
 # Secure session middleware
 # Fail closed: an unset, empty, or known-weak SESSION_SECRET must stop the app
@@ -73,7 +73,7 @@ oauth.register(
     client_kwargs={'scope': 'openid email profile'}
 )
 
-templates = Jinja2Templates(directory="templates")
+templates = Jinja2Templates(directory=BASE_DIR / "templates")
 
 # --- Pydantic Models ---
 class ListCreate(BaseModel):

@@ -19,16 +19,13 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def main() -> int:
-    # main.py resolves 'static' and 'templates' relative to the working
-    # directory, so run against an isolated CWD with copies of both. This keeps
-    # the real checklist.db untouched.
+    # Point the database at a temporary file via the documented override, so the
+    # suite never touches the real checklist.db. No working-directory juggling
+    # is needed: every path in the app is anchored to the project directory.
     workdir = tempfile.mkdtemp(prefix="checklist-test-")
-    os.chdir(workdir)
-    sys.path.insert(0, PROJECT_ROOT)
+    os.environ["DATABASE_PATH"] = os.path.join(workdir, "test.db")
     os.environ.setdefault("SESSION_SECRET", "z" * 48)
-
-    shutil.copytree(os.path.join(PROJECT_ROOT, "static"), os.path.join(workdir, "static"))
-    shutil.copytree(os.path.join(PROJECT_ROOT, "templates"), os.path.join(workdir, "templates"))
+    sys.path.insert(0, PROJECT_ROOT)
 
     import itsdangerous
     from starlette.testclient import TestClient
