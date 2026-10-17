@@ -223,6 +223,18 @@ __marimo__/
 *.db
 *.sqlite
 *.sqlite3
+# SQLite sidecar files. The pattern '*.db' does not match these, because they
+# end in -wal/-shm rather than .db. In WAL mode the -wal file holds recent
+# uncommitted pages, so it can contain real task and account data.
+*.db-wal
+*.db-shm
+*.db-journal
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite-journal
+*.sqlite3-wal
+*.sqlite3-shm
+*.sqlite3-journal
 
 # IDE / OS
 .DS_Store
