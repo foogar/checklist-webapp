@@ -396,10 +396,64 @@ async def share_list(list_id: int, payload: ShareRequest, request: Request):
         raise HTTPException(status_code=404, detail="User not found. They must log into the app first.")
     
     target_user_id = target_user[0]
+    if target_user_id == user['id']:
+        raise HTTPException(status_code=400, detail="You already own this list")
+
     cursor.execute("INSERT OR IGNORE INTO list_shares (list_id, user_id) VALUES (?, ?)", (list_id, target_user_id))
     conn.commit()
+    already = cursor.rowcount == 0
     conn.close()
+    return {"success": True, "already_shared": already}
+
+@app.get('/api/lists/{list_id}/shares')
+async def get_list_shares(list_id: int, request: Request):
+    """Owner-only. Shows who this list is currently shared with."""
+    user = get_current_user(request)
+    conn = connect()
+    cursor = conn.cursor()
+
+    cursor.execute("SELECT 1 FROM lists WHERE id = ? AND user_id = ?", (list_id, user['id']))
+    if not cursor.fetchone():
+        conn.close()
+        raise HTTPException(status_code=404, detail="List not found")
+
+    cursor.execute("""
+        SELECT u.id AS user_id, u.email, u.name
+        FROM list_shares ls
+        JOIN users u ON u.id = ls.user_id
+        WHERE ls.list_id = ?
+        ORDER BY u.name COLLATE NOCASE
+    """, (list_id,))
+
+    shares = [dict(row) for row in cursor.fetchall()]
+    conn.close()
+    return shares
+
+
+@app.delete('/api/lists/{list_id}/shares/{user_id}')
+async def revoke_list_share(list_id: int, user_id: int, request: Request):
+    """Owner-only. Takes back a previously granted share."""
+    user = get_current_user(request)
+    conn = connect()
+    cursor = conn.cursor()
+
+    # Same 404 for "no such list" and "not the owner" so ownership cannot be probed.
+    cursor.execute("SELECT 1 FROM lists WHERE id = ? AND user_id = ?", (list_id, user['id']))
+    if not cursor.fetchone():
+        conn.close()
+        raise HTTPException(status_code=404, detail="List not found")
+
+    cursor.execute(
+        "DELETE FROM list_shares WHERE list_id = ? AND user_id = ?", (list_id, user_id)
+    )
+    revoked = cursor.rowcount
+    conn.commit()
+    conn.close()
+
+    if revoked == 0:
+        raise HTTPException(status_code=404, detail="That user does not have this list shared")
     return {"success": True}
+
 
 @app.post('/api/lists/{list_id}/reorder')
 async def reorder_tasks(list_id: int, payload: ReorderRequest, request: Request):

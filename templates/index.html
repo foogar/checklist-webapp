@@ -172,10 +172,29 @@
                             <div class="mt-4 pt-3 border-t border-gray-200 dark:border-gray-700">
                                 <h3 class="text-xs font-semibold mb-1.5">Share this List</h3>
                                 <div class="flex space-x-2">
-                                    <input type="email" x-model="shareEmail" placeholder="friend@example.com" 
+                                    <input type="email" x-model="shareEmail" placeholder="friend@example.com"
                                            class="flex-1 bg-gray-50 dark:bg-gray-900 border border-gray-300 dark:border-gray-700 rounded-lg px-2.5 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-blue-500">
                                     <button @click="shareList()" class="px-3 py-1 text-xs bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition">Share</button>
                                 </div>
+
+                                <!-- Current shares, with the ability to take access back -->
+                                <div class="mt-2.5" x-show="listShares.length > 0">
+                                    <p class="text-[10px] uppercase tracking-wide text-gray-400 dark:text-gray-500 mb-1">
+                                        Shared with <span x-text="listShares.length"></span>
+                                    </p>
+                                    <template x-for="s in listShares" :key="s.user_id">
+                                        <div class="flex items-center justify-between gap-2 py-0.5">
+                                            <span class="text-xs text-gray-600 dark:text-gray-300 truncate" x-text="s.name + ' (' + s.email + ')'"></span>
+                                            <button @click="revokeShare(s)"
+                                                    class="shrink-0 text-[10px] text-red-600 hover:text-red-800 dark:text-red-400 dark:hover:text-red-300 transition">
+                                                Remove
+                                            </button>
+                                        </div>
+                                    </template>
+                                </div>
+                                <p class="mt-1.5 text-[10px] text-gray-400 dark:text-gray-500" x-show="listShares.length === 0 && activeList">
+                                    Not shared with anyone yet.
+                                </p>
                             </div>
                         </template>
                     </div>
@@ -226,6 +245,7 @@
                 tasks: [],
                 newTaskTitle: '',
                 shareEmail: '',
+                listShares: [],
                 showNewListModal: false,
                 newListTitle: '',
                 newListResettable: false,
@@ -244,6 +264,7 @@
                 showOverview() {
                     this.activeList = null;
                     this.tasks = [];
+                    this.listShares = [];
                 },
 
                 async fetchLists() {
@@ -256,7 +277,9 @@
 
                 async selectList(list) {
                     this.activeList = list;
+                    this.listShares = [];
                     await this.fetchTasks();
+                    await this.loadShares();
                 },
 
                 async fetchTasks() {
@@ -353,6 +376,27 @@
                     });
                 },
 
+                async loadShares() {
+                    if (!this.activeList) { this.listShares = []; return; }
+                    const isOwner = String(this.activeList.user_id) === String(this.user?.id);
+                    if (!isOwner) { this.listShares = []; return; }
+                    const res = await fetch(`/api/lists/${this.activeList.id}/shares`);
+                    this.listShares = res.ok ? await res.json() : [];
+                },
+
+                async revokeShare(s) {
+                    if (!confirm(`Remove access for ${s.email}?`)) return;
+                    const res = await fetch(`/api/lists/${this.activeList.id}/shares/${s.user_id}`, {
+                        method: 'DELETE'
+                    });
+                    if (res.ok) {
+                        await this.loadShares();
+                    } else {
+                        const err = await res.json();
+                        alert(err.detail || 'Failed to remove access');
+                    }
+                },
+
                 async shareList() {
                     if (!this.shareEmail.trim()) return;
                     const res = await fetch(`/api/lists/${this.activeList.id}/share`, {
@@ -361,8 +405,12 @@
                         body: JSON.stringify({ email: this.shareEmail })
                     });
                     if (res.ok) {
-                        alert('List shared successfully!');
+                        const data = await res.json();
+                        alert(data.already_shared
+                            ? `${this.shareEmail} already has access to this list.`
+                            : 'List shared successfully!');
                         this.shareEmail = '';
+                        await this.loadShares();
                     } else {
                         const err = await res.json();
                         alert(err.detail || 'Failed to share list');

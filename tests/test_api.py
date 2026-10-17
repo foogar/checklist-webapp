@@ -101,6 +101,61 @@ def main() -> int:
         404,
     )
 
+    print("== sharing and revoking ==")
+    check(
+        "owner shares with the stranger",
+        owner.post(f"/api/lists/{list_id}/share", json={"email": "stranger@test.local"}).status_code,
+        200,
+    )
+    shares = owner.get(f"/api/lists/{list_id}/shares")
+    check("owner can list shares", shares.status_code, 200)
+    check("one share present", len(shares.json()), 1)
+
+    check("stranger can now read tasks", stranger.get(f"/api/lists/{list_id}/tasks").status_code, 200)
+    check(
+        "stranger cannot see the share list",
+        stranger.get(f"/api/lists/{list_id}/shares").status_code,
+        404,
+    )
+
+    check(
+        "owner cannot share with themselves",
+        owner.post(f"/api/lists/{list_id}/share", json={"email": "owner@test.local"}).status_code,
+        400,
+    )
+
+    check(
+        "re-sharing is idempotent",
+        owner.post(f"/api/lists/{list_id}/share", json={"email": "stranger@test.local"}).json().get(
+            "already_shared"
+        ),
+        True,
+    )
+
+    sharee_id = shares.json()[0]["user_id"]
+    check(
+        "stranger cannot revoke their own access",
+        stranger.delete(f"/api/lists/{list_id}/shares/{sharee_id}").status_code,
+        404,
+    )
+
+    check(
+        "owner revokes the share",
+        owner.delete(f"/api/lists/{list_id}/shares/{sharee_id}").status_code,
+        200,
+    )
+    check("share list is now empty", len(owner.get(f"/api/lists/{list_id}/shares").json()), 0)
+    check(
+        "stranger has lost access",
+        stranger.get(f"/api/lists/{list_id}/tasks").status_code,
+        403,
+    )
+    check(
+        "revoking twice reports not found",
+        owner.delete(f"/api/lists/{list_id}/shares/{sharee_id}").status_code,
+        404,
+    )
+
     print("== body validation ==")
     check(
         "PATCH invalid status value",
