@@ -87,6 +87,21 @@ def init_db():
     );
     """)
 
+    # Shares for people who have not signed up yet. Holding an email rather
+    # than a user_id means any address can be invited without revealing whether
+    # it already has an account. Invites are claimed into list_shares the first
+    # time that email signs in, so the access-control queries only ever need to
+    # consider list_shares. Emails are stored lowercased for matching.
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS list_invites (
+        list_id INTEGER NOT NULL,
+        email TEXT NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY(list_id, email),
+        FOREIGN KEY(list_id) REFERENCES lists(id) ON DELETE CASCADE
+    );
+    """)
+
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS tasks (
         id INTEGER PRIMARY KEY AUTOINCREMENT,

@@ -182,9 +182,11 @@
                                     <p class="text-[10px] uppercase tracking-wide text-gray-400 dark:text-gray-500 mb-1">
                                         Shared with <span x-text="listShares.length"></span>
                                     </p>
-                                    <template x-for="s in listShares" :key="s.user_id">
+                                    <template x-for="s in listShares" :key="s.email">
                                         <div class="flex items-center justify-between gap-2 py-0.5">
-                                            <span class="text-xs text-gray-600 dark:text-gray-300 truncate" x-text="s.name + ' (' + s.email + ')'"></span>
+                                            <span class="text-xs truncate"
+                                                  :class="s.status === 'pending' ? 'text-gray-400 dark:text-gray-500 italic' : 'text-gray-600 dark:text-gray-300'"
+                                                  x-text="s.email + (s.status === 'pending' ? ' (invited)' : '')"></span>
                                             <button @click="revokeShare(s)"
                                                     class="shrink-0 text-[10px] text-red-600 hover:text-red-800 dark:text-red-400 dark:hover:text-red-300 transition">
                                                 Remove
@@ -386,8 +388,10 @@
 
                 async revokeShare(s) {
                     if (!confirm(`Remove access for ${s.email}?`)) return;
-                    const res = await fetch(`/api/lists/${this.activeList.id}/shares/${s.user_id}`, {
-                        method: 'DELETE'
+                    const res = await fetch(`/api/lists/${this.activeList.id}/shares`, {
+                        method: 'DELETE',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ email: s.email })
                     });
                     if (res.ok) {
                         await this.loadShares();
@@ -406,9 +410,17 @@
                     });
                     if (res.ok) {
                         const data = await res.json();
-                        alert(data.already_shared
-                            ? `${this.shareEmail} already has access to this list.`
-                            : 'List shared successfully!');
+                        let msg;
+                        if (data.status === 'invited') {
+                            msg = data.already
+                                ? `${this.shareEmail} was already invited.`
+                                : `${this.shareEmail} will get access when they sign in with that email.`;
+                        } else {
+                            msg = data.already
+                                ? `${this.shareEmail} already has access to this list.`
+                                : 'List shared successfully!';
+                        }
+                        alert(msg);
                         this.shareEmail = '';
                         await this.loadShares();
                     } else {

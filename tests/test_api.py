@@ -124,7 +124,7 @@ def main() -> int:
     check(
         "re-sharing is idempotent",
         owner.post(f"/api/lists/{list_id}/share", json={"email": "stranger@test.local"}).json().get(
-            "already_shared"
+            "already"
         ),
         True,
     )
@@ -132,13 +132,15 @@ def main() -> int:
     sharee_id = shares.json()[0]["user_id"]
     check(
         "stranger cannot revoke their own access",
-        stranger.delete(f"/api/lists/{list_id}/shares/{sharee_id}").status_code,
+        stranger.request("DELETE", f"/api/lists/{list_id}/shares", json={"email": "stranger@test.local"}).status_code,
         404,
     )
 
     check(
         "owner revokes the share",
-        owner.delete(f"/api/lists/{list_id}/shares/{sharee_id}").status_code,
+        owner.request(
+            "DELETE", f"/api/lists/{list_id}/shares", json={"email": "stranger@test.local"}
+        ).status_code,
         200,
     )
     check("share list is now empty", len(owner.get(f"/api/lists/{list_id}/shares").json()), 0)
@@ -149,18 +151,28 @@ def main() -> int:
     )
     check(
         "revoking twice reports not found",
-        owner.delete(f"/api/lists/{list_id}/shares/{sharee_id}").status_code,
+        owner.request(
+            "DELETE", f"/api/lists/{list_id}/shares", json={"email": "stranger@test.local"}
+        ).status_code,
         404,
     )
 
+    print("== email enumeration is closed ==")
+    registered = owner.post(f"/api/lists/{list_id}/share", json={"email": "stranger@test.local"})
+    unregistered = owner.post(f"/api/lists/{list_id}/share", json={"email": "never-seen@test.local"})
+    check("registered and unregistered both return 200",
+          (registered.status_code, unregistered.status_code), (200, 200))
+    check("both responses carry the same keys",
+          sorted(registered.json()), sorted(unregistered.json()))
+    check("only the status value differs",
+          (registered.json()["status"], unregistered.json()["status"]), ("shared", "invited"))
+
     print("== revocation while the sharee already has the list open ==")
-    owner.post(f"/api/lists/{list_id}/share", json={"email": "stranger@test.local"})
-    sharee_id = owner.get(f"/api/lists/{list_id}/shares").json()[0]["user_id"]
     open_tasks = stranger.get(f"/api/lists/{list_id}/tasks")
     check("sharee loads tasks before revocation", open_tasks.status_code, 200)
     check("sharee sees the task title", open_tasks.json()[0]["title"], "Milk")
 
-    owner.delete(f"/api/lists/{list_id}/shares/{sharee_id}")
+    owner.request("DELETE", f"/api/lists/{list_id}/shares", json={"email": "stranger@test.local"})
 
     # Access is re-evaluated per request, so every fresh call is denied.
     check("sharee cannot re-read the list", stranger.get(f"/api/lists/{list_id}/tasks").status_code, 403)
@@ -172,6 +184,51 @@ def main() -> int:
           stranger.post(f"/api/lists/{list_id}/reset").status_code, 403)
     check("the list is gone from the sharee's list view",
           any(x["id"] == list_id for x in stranger.get("/api/lists").json()), False)
+
+    print("== pending invites ==")
+    owner.post(f"/api/lists/{list_id}/share", json={"email": "never-seen@test.local"})
+    entries = owner.get(f"/api/lists/{list_id}/shares").json()
+    pending = [e for e in entries if e["status"] == "pending"]
+    check("the unseen address is listed as pending", len(pending), 1)
+    check("pending entry carries the email", pending[0]["email"], "never-seen@test.local")
+    check("confirmed entries are listed first",
+          [e["status"] for e in entries].index("pending") == len(entries) - 1, True)
+
+    # First sign-in for that address claims the invite, same path login uses.
+    main.upsert_user("never-seen@test.local", "Newcomer")
+    after = owner.get(f"/api/lists/{list_id}/shares").json()
+    check("the invite became a confirmed share on signup",
+          any(e["status"] == "confirmed" and e["email"] == "never-seen@test.local" for e in after), True)
+    check("no pending entries remain", [e for e in after if e["status"] == "pending"], [])
+    db = main.connect()
+    check("the invite table was emptied",
+          db.execute("SELECT COUNT(*) FROM list_invites").fetchone()[0], 0)
+    check("the share landed in list_shares",
+          db.execute("""
+              SELECT COUNT(*) FROM list_shares ls JOIN users u ON u.id = ls.user_id
+              WHERE u.email = 'never-seen@test.local'
+          """).fetchone()[0], 1)
+    db.close()
+
+    print("== a revoked invite is never granted ==")
+    owner.post(f"/api/lists/{list_id}/share", json={"email": "future@test.local"})
+    check("it shows as pending",
+          any(e["status"] == "pending" and e["email"] == "future@test.local"
+              for e in owner.get(f"/api/lists/{list_id}/shares").json()), True)
+    check("owner revokes the invite",
+          owner.request("DELETE", f"/api/lists/{list_id}/shares", json={"email": "future@test.local"}).status_code,
+          200)
+    main.upsert_user("future@test.local", "Future")
+    check("signing up does not resurrect it",
+          any(e["email"] == "future@test.local"
+              for e in owner.get(f"/api/lists/{list_id}/shares").json()), False)
+
+    print("== invites are case-insensitive ==")
+    mixed = owner.post(f"/api/lists/{list_id}/share", json={"email": "MixedCase@Test.LOCAL"})
+    main.upsert_user("mixedcase@test.local", "Mixed")
+    check("an address invited in mixed case still matches on signup",
+          any(e["email"] == "mixedcase@test.local" and e["status"] == "confirmed"
+              for e in owner.get(f"/api/lists/{list_id}/shares").json()), True)
 
     print("== body validation ==")
     check(

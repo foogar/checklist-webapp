@@ -26,6 +26,18 @@ A self-hosted, mobile-friendly collaborative checklist web application built wit
 5. Once served over HTTPS, set `SESSION_COOKIE_SECURE=1` in `.env` so the
    browser will not send the session cookie over plain HTTP.
 
+## Sharing
+Only the list owner can share it, see who it is shared with, or take access
+back. Type an email address and press Share.
+
+If that address already has an account it gains access immediately. If it does
+not, an invite is recorded and access is granted the first time that address
+signs in — so you can share with someone before they have ever used the app,
+without the response revealing whether they have an account here.
+
+Invited addresses appear in greyed-out italics until they sign up, and the same
+Remove button revokes either a confirmed share or a pending invite.
+
 ## Data location
 By default the SQLite database is `checklist.db` beside the application code,
 found relative to the application itself rather than the working directory, so

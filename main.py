@@ -86,6 +86,9 @@ class TaskCreate(BaseModel):
 class ShareRequest(BaseModel):
     email: str
 
+class RevokeShareRequest(BaseModel):
+    email: str
+
 class TaskStatusUpdate(BaseModel):
     # Validated by pydantic, so a malformed body yields 422 rather than a 500.
     status: Literal['pending', 'completed']
@@ -100,9 +103,27 @@ def get_current_user(request: Request):
         raise HTTPException(status_code=401, detail="Not authenticated")
     return user
 
+def claim_invites(conn, cursor, user_id, email):
+    """Turn any pending invites for this email into real shares.
+
+    Called on every successful login. Moving them into list_shares here means
+    the rest of the app only ever has to check list_shares, so access control
+    has a single table to reason about.
+    """
+    cursor.execute("""
+        INSERT OR IGNORE INTO list_shares (list_id, user_id)
+        SELECT list_id, ? FROM list_invites WHERE email = ?
+    """, (user_id, email))
+    claimed = cursor.rowcount
+    cursor.execute("DELETE FROM list_invites WHERE email = ?", (email,))
+    conn.commit()
+    return claimed
+
+
 def upsert_user(email, name):
     """Find or create a user by email. Shared by the OAuth callback and the
     development login so both populate the database identically."""
+    email = email.strip().lower()
     conn = connect()
     cursor = conn.cursor()
     cursor.execute("SELECT id FROM users WHERE email = ?", (email,))
@@ -113,6 +134,10 @@ def upsert_user(email, name):
         user_id = cursor.lastrowid
     else:
         user_id = row[0]
+
+    # First sign-in for this address: pick up anything shared with them while
+    # they did not yet have an account.
+    claim_invites(conn, cursor, user_id, email)
     conn.close()
     return user_id
 
@@ -381,33 +406,43 @@ async def share_list(list_id: int, payload: ShareRequest, request: Request):
     user = get_current_user(request)
     conn = connect()
     cursor = conn.cursor()
-    
+
     # Verify owner access
     cursor.execute("SELECT 1 FROM lists WHERE id = ? AND user_id = ?", (list_id, user['id']))
     if not cursor.fetchone():
         conn.close()
         raise HTTPException(status_code=403, detail="Only list owner can share this list")
-    
-    # Find user by email (they must have logged in at least once)
-    cursor.execute("SELECT id FROM users WHERE email = ?", (payload.email,))
-    target_user = cursor.fetchone()
-    if not target_user:
-        conn.close()
-        raise HTTPException(status_code=404, detail="User not found. They must log into the app first.")
-    
-    target_user_id = target_user[0]
-    if target_user_id == user['id']:
-        raise HTTPException(status_code=400, detail="You already own this list")
 
-    cursor.execute("INSERT OR IGNORE INTO list_shares (list_id, user_id) VALUES (?, ?)", (list_id, target_user_id))
+    email = payload.email.strip().lower()
+
+    # A registered address is shared immediately. An unregistered one becomes a
+    # pending invite and is claimed when that address next signs in. Both return
+    # the same status and shape, so this endpoint cannot be used to discover
+    # which email addresses have accounts on this server.
+    cursor.execute("SELECT id FROM users WHERE email = ?", (email,))
+    target = cursor.fetchone()
+
+    if target:
+        target_user_id = target[0]
+        if target_user_id == user['id']:
+            conn.close()
+            raise HTTPException(status_code=400, detail="You already own this list")
+        cursor.execute("INSERT OR IGNORE INTO list_shares (list_id, user_id) VALUES (?, ?)", (list_id, target_user_id))
+        conn.commit()
+        already = cursor.rowcount == 0
+        conn.close()
+        return {"success": True, "status": "shared", "already": already}
+
+    cursor.execute("INSERT OR IGNORE INTO list_invites (list_id, email) VALUES (?, ?)", (list_id, email))
     conn.commit()
     already = cursor.rowcount == 0
     conn.close()
-    return {"success": True, "already_shared": already}
+    return {"success": True, "status": "invited", "already": already}
 
 @app.get('/api/lists/{list_id}/shares')
 async def get_list_shares(list_id: int, request: Request):
-    """Owner-only. Shows who this list is currently shared with."""
+    """Owner-only. Shows who this list is shared with, plus any pending
+    invites for addresses that have not signed in yet."""
     user = get_current_user(request)
     conn = connect()
     cursor = conn.cursor()
@@ -418,21 +453,29 @@ async def get_list_shares(list_id: int, request: Request):
         raise HTTPException(status_code=404, detail="List not found")
 
     cursor.execute("""
-        SELECT u.id AS user_id, u.email, u.name
+        SELECT u.id AS user_id, u.email, u.name, 'confirmed' AS status
         FROM list_shares ls
         JOIN users u ON u.id = ls.user_id
         WHERE ls.list_id = ?
-        ORDER BY u.name COLLATE NOCASE
     """, (list_id,))
-
     shares = [dict(row) for row in cursor.fetchall()]
+
+    cursor.execute("""
+        SELECT NULL AS user_id, i.email, i.email AS name, 'pending' AS status
+        FROM list_invites i
+        WHERE i.list_id = ?
+    """, (list_id,))
+    shares.extend(dict(row) for row in cursor.fetchall())
+
+    shares.sort(key=lambda s: (s["status"] != "confirmed", (s["name"] or "").lower()))
     conn.close()
     return shares
 
 
-@app.delete('/api/lists/{list_id}/shares/{user_id}')
-async def revoke_list_share(list_id: int, user_id: int, request: Request):
-    """Owner-only. Takes back a previously granted share."""
+@app.delete('/api/lists/{list_id}/shares')
+async def revoke_list_share(list_id: int, payload: RevokeShareRequest, request: Request):
+    """Owner-only. Takes back access, whether it was granted directly or is
+    still a pending invite. Keyed by email so one endpoint covers both."""
     user = get_current_user(request)
     conn = connect()
     cursor = conn.cursor()
@@ -443,15 +486,24 @@ async def revoke_list_share(list_id: int, user_id: int, request: Request):
         conn.close()
         raise HTTPException(status_code=404, detail="List not found")
 
-    cursor.execute(
-        "DELETE FROM list_shares WHERE list_id = ? AND user_id = ?", (list_id, user_id)
-    )
-    revoked = cursor.rowcount
+    email = payload.email.strip().lower()
+
+    # Clearing the invite too covers an address that was invited and has since
+    # signed up, which would otherwise become a share again on their next login.
+    cursor.execute("DELETE FROM list_invites WHERE list_id = ? AND email = ?", (list_id, email))
+    revoked_invites = cursor.rowcount
+
+    cursor.execute("""
+        DELETE FROM list_shares
+        WHERE list_id = ?
+          AND user_id = (SELECT id FROM users WHERE email = ?)
+    """, (list_id, email))
+    revoked_shares = cursor.rowcount
     conn.commit()
     conn.close()
 
-    if revoked == 0:
-        raise HTTPException(status_code=404, detail="That user does not have this list shared")
+    if not (revoked_invites or revoked_shares):
+        raise HTTPException(status_code=404, detail="That address does not have this list")
     return {"success": True}
 
 
