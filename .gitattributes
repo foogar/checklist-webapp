@@ -1,0 +1,19 @@
+# Normalize line endings in the repository.
+#
+# Without this, Windows (core.autocrlf=true) checks files out with CRLF while
+# other platforms use LF, which turns an unrelated edit into a whole-file diff
+# and makes real changes hard to review.
+#
+# The repository stores LF; Windows still works fine because Python and the
+# browser both accept either.
+
+* text=auto eol=lf
+
+# Binary assets: never convert, never diff.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.ico binary
+*.db binary
+*.woff binary
+*.woff2 binary
