@@ -110,8 +110,20 @@
                 <template x-if="activeList">
                     <div class="bg-white dark:bg-gray-800 rounded-xl shadow-sm border border-gray-200 dark:border-gray-700 p-4">
                         <div class="flex justify-between items-center mb-3">
-                            <p class="text-[11px] text-gray-500 dark:text-gray-400" x-text="activeList.is_resettable ? 'Manual Reset Daily List' : 'Standard List'"></p>
-                            <div class="flex space-x-2">
+                            <div class="flex items-center gap-2 min-w-0">
+                                <p class="text-[11px] text-gray-500 dark:text-gray-400 truncate" x-text="activeList.is_resettable ? 'Manual Reset Daily List' : 'Standard List'"></p>
+                                <!-- Deliberately on the opposite side of the header from
+                                     Reset/Delete: Edit is easy to toggle by accident,
+                                     while Delete is not something to hit by accident. -->
+                                <button @click="editing = !editing" title="Show reorder and delete controls"
+                                        :class="editing
+                                            ? 'bg-blue-600 text-white border-blue-600'
+                                            : 'text-gray-500 dark:text-gray-400 border-gray-300 dark:border-gray-600 hover:border-blue-500 hover:text-blue-600'"
+                                        class="shrink-0 text-[11px] font-medium px-2 py-0.5 rounded border transition">
+                                    Edit
+                                </button>
+                            </div>
+                            <div class="flex items-center space-x-2 shrink-0">
                                 <button x-show="activeList.is_resettable && String(activeList.user_id) === String(user.id)" @click="resetList()" class="bg-amber-600 hover:bg-amber-700 text-white px-2 py-1 rounded text-[11px] font-medium transition">
                                     Reset
                                 </button>
@@ -120,6 +132,10 @@
                                 </button>
                             </div>
                         </div>
+
+                        <p x-show="editing" x-transition.opacity class="text-[10px] text-blue-600 dark:text-blue-400 mb-2">
+                            Reordering and per-item delete are shown while editing.
+                        </p>
 
                         <!-- Add Task Input -->
                         <form @submit.prevent="addTask" class="flex gap-2 mb-3">
@@ -132,11 +148,11 @@
                         <div class="space-y-1.5 mb-3">
                             <template x-for="(task, index) in pendingTasks" :key="task.id">
                                 <div class="flex items-center justify-between px-2.5 py-1.5 bg-gray-50 dark:bg-gray-900/50 rounded-lg border border-gray-200 dark:border-gray-800">
-                                    <label class="flex items-center space-x-2.5 cursor-pointer flex-1">
-                                        <input type="checkbox" @change="toggleTaskStatus(task)" class="w-3.5 h-3.5 text-blue-600 rounded focus:ring-blue-500">
+                                    <label class="flex items-center space-x-2.5 cursor-pointer flex-1 min-w-0">
+                                        <input type="checkbox" @change="toggleTaskStatus(task)" class="w-3.5 h-3.5 text-blue-600 rounded focus:ring-blue-500 shrink-0">
                                         <span class="text-xs" x-text="task.title"></span>
                                     </label>
-                                    <div class="flex items-center space-x-1">
+                                    <div class="flex items-center space-x-1 shrink-0" x-show="editing">
                                         <!-- Reorder Buttons -->
                                         <div class="flex space-x-0.5">
                                             <button type="button" @click="moveTask(index, 'up')" class="text-[10px] px-1.5 py-0.5 bg-gray-200 dark:bg-gray-700 rounded hover:bg-gray-300 dark:hover:bg-gray-600">▲</button>
@@ -156,11 +172,11 @@
                                 <div class="space-y-1.5">
                                     <template x-for="task in completedTasks" :key="task.id">
                                         <div class="flex items-center justify-between px-2.5 py-1.5 bg-gray-50 dark:bg-gray-900/50 rounded-lg border border-gray-200 dark:border-gray-800 opacity-75">
-                                            <label class="flex items-center space-x-2.5 cursor-pointer flex-1">
-                                                <input type="checkbox" checked @change="toggleTaskStatus(task)" class="w-3.5 h-3.5 text-blue-600 rounded focus:ring-blue-500">
+                                            <label class="flex items-center space-x-2.5 cursor-pointer flex-1 min-w-0">
+                                                <input type="checkbox" checked @change="toggleTaskStatus(task)" class="w-3.5 h-3.5 text-blue-600 rounded focus:ring-blue-500 shrink-0">
                                                 <span class="text-xs line-through" x-text="task.title"></span>
                                             </label>
-                                            <button @click="deleteTask(task.id)" class="text-gray-400 hover:text-red-600 dark:hover:text-red-400 text-xs px-1">×</button>
+                                            <button x-show="editing" @click="deleteTask(task.id)" class="text-gray-400 hover:text-red-600 dark:hover:text-red-400 text-xs px-1 shrink-0">×</button>
                                         </div>
                                     </template>
                                 </div>
@@ -248,6 +264,7 @@
                 newTaskTitle: '',
                 shareEmail: '',
                 listShares: [],
+                editing: false,
                 showNewListModal: false,
                 newListTitle: '',
                 newListResettable: false,
@@ -267,6 +284,7 @@
                     this.activeList = null;
                     this.tasks = [];
                     this.listShares = [];
+                    this.editing = false;
                 },
 
                 async fetchLists() {
@@ -280,6 +298,9 @@
                 async selectList(list) {
                     this.activeList = list;
                     this.listShares = [];
+                    // Enter a fresh list in normal viewing mode, so reorder and
+                    // delete are never one stray tap away by default.
+                    this.editing = false;
                     await this.fetchTasks();
                     await this.loadShares();
                 },
