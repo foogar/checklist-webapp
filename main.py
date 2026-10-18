@@ -16,6 +16,7 @@ import sys
 from typing import Literal
 
 from database import BASE_DIR, connect, init_db
+import rate_limit
 
 # Initialize database on startup
 init_db()
@@ -55,6 +56,12 @@ if len(SESSION_SECRET) < 32:
 SESSION_COOKIE_SECURE = os.getenv("SESSION_COOKIE_SECURE", "0").strip().lower() in {
     "1", "true", "yes", "on",
 }
+
+# Rate limiting is registered first so that Starlette runs it innermost, after
+# SessionMiddleware has already populated request.session. Registering it after
+# the session middleware would place it outermost, where the session is not yet
+# available and every caller would collapse into a single IP-keyed bucket.
+rate_limit.install(app)
 
 app.add_middleware(
     SessionMiddleware,

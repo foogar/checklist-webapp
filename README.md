@@ -38,6 +38,24 @@ without the response revealing whether they have an account here.
 Invited addresses appear in greyed-out italics until they sign up, and the same
 Remove button revokes either a confirmed share or a pending invite.
 
+## Rate limiting
+Requests are counted per signed-in user, falling back to the client IP for
+anonymous callers. Requests over the limit get a `429` with a `Retry-After`
+header. Counters are in memory and slide rather than lock out, so a caller
+recovers on their own once the window drains.
+
+| Setting | Default | Covers |
+|---|---|---|
+| `RATE_LIMIT_ENABLED` | `1` | Master switch; `0` disables |
+| `RATE_LIMIT_REQUESTS` / `RATE_LIMIT_WINDOW` | `600` / `60` | All other paths |
+| `RATE_LIMIT_AUTH_REQUESTS` / `RATE_LIMIT_AUTH_WINDOW` | `20` / `60` | `/auth/*` |
+
+Per-user rather than per-IP is deliberate: an IP-keyed limit cannot tell one
+account hammering the API from a whole household sharing one router.
+
+Counters live in process memory, so each uvicorn worker keeps its own. Run the
+default single worker, or the effective limit multiplies by the worker count.
+
 ## Data location
 By default the SQLite database is `checklist.db` beside the application code,
 found relative to the application itself rather than the working directory, so
