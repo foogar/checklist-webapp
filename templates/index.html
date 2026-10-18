@@ -145,10 +145,11 @@
                         </form>
 
                         <!-- Pending Tasks (Compacted) -->
-                        <div class="space-y-1.5 mb-3">
+                        <div class="space-y-1 mb-3">
                             <template x-for="(task, index) in pendingTasks" :key="task.id">
-                                <div class="flex items-center justify-between px-2.5 py-1.5 bg-gray-50 dark:bg-gray-900/50 rounded-lg border border-gray-200 dark:border-gray-800">
-                                    <label class="flex items-center space-x-2.5 cursor-pointer flex-1 min-w-0">
+                                <div class="flex items-center justify-between rounded-lg border border-gray-200 dark:border-gray-800 bg-gray-50 dark:bg-gray-900/50"
+                                     :class="editing ? 'px-2.5 py-1.5' : 'px-1.5 py-1'">
+                                    <label class="flex items-center cursor-pointer flex-1 min-w-0" :class="editing ? 'space-x-2.5' : 'space-x-2'">
                                         <input type="checkbox" @change="toggleTaskStatus(task)" class="w-3.5 h-3.5 text-blue-600 rounded focus:ring-blue-500 shrink-0">
                                         <span class="text-xs" x-text="task.title"></span>
                                     </label>
@@ -169,10 +170,11 @@
                         <template x-if="completedTasks.length > 0">
                             <div class="border-t border-gray-200 dark:border-gray-700 pt-3">
                                 <h3 class="text-xs font-medium text-gray-500 dark:text-gray-400 mb-2">Completed</h3>
-                                <div class="space-y-1.5">
+                                <div class="space-y-1">
                                     <template x-for="task in completedTasks" :key="task.id">
-                                        <div class="flex items-center justify-between px-2.5 py-1.5 bg-gray-50 dark:bg-gray-900/50 rounded-lg border border-gray-200 dark:border-gray-800 opacity-75">
-                                            <label class="flex items-center space-x-2.5 cursor-pointer flex-1 min-w-0">
+                                        <div class="flex items-center justify-between rounded-lg border border-gray-200 dark:border-gray-800 bg-gray-50 dark:bg-gray-900/50 opacity-75"
+                                             :class="editing ? 'px-2.5 py-1.5' : 'px-1.5 py-1'">
+                                            <label class="flex items-center cursor-pointer flex-1 min-w-0" :class="editing ? 'space-x-2.5' : 'space-x-2'">
                                                 <input type="checkbox" checked @change="toggleTaskStatus(task)" class="w-3.5 h-3.5 text-blue-600 rounded focus:ring-blue-500 shrink-0">
                                                 <span class="text-xs line-through" x-text="task.title"></span>
                                             </label>
