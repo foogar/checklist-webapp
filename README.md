@@ -8,6 +8,33 @@ A self-hosted, mobile-friendly collaborative checklist web application built wit
 - Account sharing by email
 - Daily reset mode and task reordering
 
+## Security headers
+The application sets these on every response, so they are version controlled
+and testable rather than living in dashboard config:
+
+| Header | Value |
+|---|---|
+| `Strict-Transport-Security` | `max-age=31536000; includeSubDomains` |
+| `X-Content-Type-Options` | `nosniff` |
+| `X-Frame-Options` | `DENY` |
+| `Referrer-Policy` | `strict-origin-when-cross-origin` |
+| `X-DNS-Prefetch-Control` | `off` |
+
+HSTS is tied to `SESSION_COOKIE_SECURE`: it is only sent when that is on, since
+emitting it over plain HTTP would make an http-only or local deployment
+unreachable. The other four are harmless on any transport.
+
+Set the same headers in a Cloudflare Transform Rule as well. These only cover
+responses the application produced, so a 502 or 521 from a proxy in front of a
+stopped app would not carry them.
+
+There is deliberately no Content-Security-Policy. The app loads Tailwind from a
+CDN that compiles CSS in the browser using `eval`, plus Alpine from a CDN, with
+inline scripts in the template. A policy tight enough to be worth having would
+need `unsafe-inline` and `unsafe-eval`, which largely defeats the purpose.
+Doing it properly means building the CSS at deploy time instead of running the
+Tailwind CDN.
+
 ## Offline behaviour
 There is a service worker at `/sw.js`, so the app is installable from the
 browser and launches in a standalone window with a home-screen icon.

@@ -17,6 +17,7 @@ from typing import Literal
 
 from database import BASE_DIR, connect, init_db
 import rate_limit
+import security_headers
 
 # Initialize database on startup
 init_db()
@@ -62,6 +63,10 @@ SESSION_COOKIE_SECURE = os.getenv("SESSION_COOKIE_SECURE", "0").strip().lower() 
 # the session middleware would place it outermost, where the session is not yet
 # available and every caller would collapse into a single IP-keyed bucket.
 rate_limit.install(app)
+
+# Outermost, so these headers are attached even to responses produced by a
+# later middleware rather than only to successful handler returns.
+security_headers.install(app, hsts_enabled=SESSION_COOKIE_SECURE)
 
 app.add_middleware(
     SessionMiddleware,
