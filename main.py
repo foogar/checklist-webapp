@@ -68,7 +68,8 @@ rate_limit.install(app)
 
 # Outermost, so these headers are attached even to responses produced by a
 # later middleware rather than only to successful handler returns.
-security_headers.install(app, hsts_enabled=SESSION_COOKIE_SECURE)
+CSP_ENABLED = os.getenv("CSP_ENABLED", "1").strip().lower() in {"1", "true", "yes", "on"}
+security_headers.install(app, hsts_enabled=SESSION_COOKIE_SECURE, csp_enabled=CSP_ENABLED)
 
 app.add_middleware(
     SessionMiddleware,
@@ -317,7 +318,14 @@ async def service_worker():
 @app.get('/')
 async def index(request: Request):
     user = request.session.get('user')
-    return templates.TemplateResponse("index.html", {"request": request, "user": user})
+    # The nonce is minted per request by SecurityHeadersMiddleware and matched
+    # against the CSP header on this response. Inline scripts without it are
+    # blocked, which is the whole point of the nonce.
+    return templates.TemplateResponse("index.html", {
+        "request": request,
+        "user": user,
+        "csp_nonce": getattr(request.state, "csp_nonce", ""),
+    })
 
 # --- API: Lists ---
 @app.get('/api/lists')

@@ -28,12 +28,33 @@ Set the same headers in a Cloudflare Transform Rule as well. These only cover
 responses the application produced, so a 502 or 521 from a proxy in front of a
 stopped app would not carry them.
 
-There is deliberately no Content-Security-Policy. The app loads Tailwind from a
-CDN that compiles CSS in the browser using `eval`, plus Alpine from a CDN, with
-inline scripts in the template. A policy tight enough to be worth having would
-need `unsafe-inline` and `unsafe-eval`, which largely defeats the purpose.
-Doing it properly means building the CSS at deploy time instead of running the
-Tailwind CDN.
+### Content-Security-Policy
+
+```
+default-src 'self'; script-src 'self' 'nonce-<per-request>' 'unsafe-eval';
+style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self';
+connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self';
+frame-ancestors 'none'
+```
+
+A fresh nonce is minted per response and stamped onto the inline scripts, so an
+injected `<script>` without that nonce is refused. There are no third-party
+script origins because nothing is loaded from a CDN.
+
+Two directives are weaker than they look, deliberately:
+
+- **`'unsafe-eval'`** — Alpine compiles expressions such as `editing = !editing`
+  with `new Function` and cannot run otherwise. It permits eval only in scripts
+  already allowed to run, so it is not itself an entry point, but this policy
+  cannot stop a script-injection bug from executing. Closing that gap means
+  Alpine's CSP build (`@alpinejs/csp`), which restricts expressions to named
+  lookups and would mean rewriting every binding in the template.
+- **`style-src 'unsafe-inline'`** — Alpine writes inline styles for `x-show`
+  and `x-transition`.
+
+Set `CSP_ENABLED=0` in `.env` to turn the policy off, which is the escape hatch
+if a browser blocks something unexpected. The console will name the directive
+responsible.
 
 ## Offline behaviour
 There is a service worker at `/sw.js`, so the app is installable from the

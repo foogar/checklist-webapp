@@ -258,7 +258,7 @@
         </div>
     </div>
 
-    <script>
+    <script nonce="{{ csp_nonce }}">
         function app() {
             return {
                 darkMode: localStorage.getItem('darkMode') === 'true',
@@ -491,7 +491,7 @@
             }
         }
     </script>
-    <script>
+    <script nonce="{{ csp_nonce }}">
         // Registering is best-effort: the app is fully usable without it, and
         // an unsupported browser should not surface an error.
         if ('serviceWorker' in navigator) {
