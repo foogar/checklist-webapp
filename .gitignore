@@ -228,6 +228,12 @@ __marimo__/
 *.sqlite*
 *.sqlite3*
 
+# Tailwind standalone CLI binary. Large, and only needed to rebuild the CSS.
+tailwindcss
+tailwindcss.exe
+tailwindcss-linux-x64
+tailwindcss-windows-x64.exe
+
 # IDE / OS
 .DS_Store
 .vscode/

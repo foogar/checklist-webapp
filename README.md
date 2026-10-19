@@ -60,6 +60,33 @@ offline too, so you get that message rather than a raw 502 during a restart.
 When you change `static/sw.js`, bump its `VERSION` constant. The worker then
 updates itself and purges the previous cache on its own.
 
+## Frontend styling
+Tailwind is compiled at deploy time into `static/app.css` from
+`static/app.src.css`, rather than running in the browser. This keeps roughly
+400 KB of JavaScript off the critical path and removes the flash of unstyled
+content, since the stylesheet arrives with the HTML.
+
+**Rebuild after changing any class in a template**, or the change will not
+appear:
+
+```bash
+curl -sLO https://github.com/tailwindlabs/tailwindcss/releases/download/v3.4.17/tailwindcss-linux-x64
+chmod +x tailwindcss-linux-x64
+./tailwindcss-linux-x64 -i static/app.src.css -o static/app.css --minify
+```
+
+The built `app.css` is committed, so a deploy does not have to rebuild unless
+the templates changed.
+
+Two things to watch:
+
+- **Stay on Tailwind v3.** `cdn.tailwindcss.com` is v3, and v4 is a rewrite with
+  a different configuration model and renamed utilities. Do not take a newer
+  standalone release without migrating deliberately.
+- **`darkMode: 'class'` in `tailwind.config.js` is required.** The app has a
+  manual dark mode toggle that sets a class on `<html>`. The default is
+  `prefers-color-scheme`, which would silently make the toggle do nothing.
+
 ## Setup
 1. Clone the repository
 2. Create a virtual environment and install dependencies:
