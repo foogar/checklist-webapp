@@ -8,6 +8,27 @@ A self-hosted, mobile-friendly collaborative checklist web application built wit
 - Account sharing by email
 - Daily reset mode and task reordering
 
+## Offline behaviour
+There is a service worker at `/sw.js`, so the app is installable from the
+browser and launches in a standalone window with a home-screen icon.
+
+It caches **only** public static assets — the icons, the web app manifest, and
+the Tailwind and Alpine scripts from the CDN. It deliberately never caches the
+HTML document or any `/api/` or `/auth/` response:
+
+- The page is rendered server-side with the signed-in user inlined, so a cached
+  copy would leave one person's name and email in Cache Storage, readable by
+  whoever next uses the browser on that device.
+- API responses are per-user; caching them would serve one person's checklists
+  to another, and would keep serving them after logout.
+
+Tasks live on the server, so they need a connection to load. Offline the app
+opens with an amber banner saying so. A dead backend behind a proxy counts as
+offline too, so you get that message rather than a raw 502 during a restart.
+
+When you change `static/sw.js`, bump its `VERSION` constant. The worker then
+updates itself and purges the previous cache on its own.
+
 ## Setup
 1. Clone the repository
 2. Create a virtual environment and install dependencies:

@@ -27,6 +27,13 @@
             </button>
             
             <div class="flex items-center space-x-3">
+                <!-- Connection Warning -->
+                <div x-show="offline" x-transition
+                     class="mx-4 mt-3 px-3 py-2 rounded-lg bg-amber-100 dark:bg-amber-900/40 border border-amber-300 dark:border-amber-700 text-amber-800 dark:text-amber-200 text-[11px] flex items-center gap-2">
+                    <span class="shrink-0">&#9888;</span>
+                    <span>You are offline. Checklists are stored on the server, so they will not load until the connection is back.</span>
+                </div>
+
                 <!-- Dark Mode Toggle -->
                 <button @click="toggleDarkMode()" class="p-1.5 rounded-lg bg-gray-200 dark:bg-gray-800 hover:bg-gray-300 dark:hover:bg-gray-700 transition">
                     <svg x-show="!darkMode" class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z"></path></svg>
@@ -270,6 +277,7 @@
                 showNewListModal: false,
                 newListTitle: '',
                 newListResettable: false,
+                offline: !navigator.onLine,
 
                 toggleDarkMode() {
                     this.darkMode = !this.darkMode;
@@ -277,8 +285,33 @@
                 },
 
                 async init() {
-                    if (this.user) {
+                    window.addEventListener('online', () => {
+                        this.offline = false;
+                        if (this.user) this.fetchLists();
+                    });
+                    window.addEventListener('offline', () => { this.offline = true; });
+
+                    if (this.user && !this.offline) {
                         await this.fetchLists();
+                    }
+                },
+
+                // Any fetch can fail because the connection dropped rather
+                // than because the server rejected the request. Flip the
+                // offline flag so the banner appears instead of the UI
+                // silently looking empty.
+                // A 5xx counts as offline too: behind a proxy an unreachable
+                // origin returns a well-formed error response rather than a
+                // thrown error, so catching alone would miss a dead backend.
+                async get(url, options) {
+                    try {
+                        const res = await fetch(url, options);
+                        if (res.status >= 500) this.offline = true;
+                        else this.offline = false;
+                        return res;
+                    } catch (err) {
+                        this.offline = true;
+                        return null;
                     }
                 },
 
@@ -290,8 +323,8 @@
                 },
 
                 async fetchLists() {
-                    const res = await fetch('/api/lists');
-                    if (res.ok) {
+                    const res = await this.get('/api/lists');
+                    if (res && res.ok) {
                         this.lists = await res.json();
                         // Defaults to overview view (activeList = null)
                     }
@@ -460,6 +493,17 @@
                     return this.tasks.filter(t => t.status === 'completed');
                 }
             }
+        }
+    </script>
+    <script>
+        // Registering is best-effort: the app is fully usable without it, and
+        // an unsupported browser should not surface an error.
+        if ('serviceWorker' in navigator) {
+            window.addEventListener('load', function () {
+                navigator.serviceWorker.register('/sw.js').catch(function (err) {
+                    console.warn('Service worker registration failed:', err);
+                });
+            });
         }
     </script>
 </body>

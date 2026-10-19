@@ -5,7 +5,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # ... (rest of the imports and code)
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -242,6 +242,25 @@ async def manifest():
             }
         ]
     }
+
+# --- Service Worker ---
+@app.get('/sw.js')
+async def service_worker():
+    """Serve the worker from the root so its scope covers the whole app.
+
+    A worker served from /static/sw.js would default to a scope of /static/ and
+    would never see page navigations or API calls. no-cache makes the browser
+    revalidate this file, which is how a changed worker replaces the old one.
+    """
+    path = BASE_DIR / "static" / "sw.js"
+    return Response(
+        content=path.read_text(encoding="utf-8"),
+        media_type="application/javascript",
+        headers={
+            "Cache-Control": "no-cache",
+            "Service-Worker-Allowed": "/",
+        },
+    )
 
 # --- Frontend Route ---
 @app.get('/')
