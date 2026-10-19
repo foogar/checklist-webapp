@@ -16,9 +16,8 @@
  * worker replaces the old one automatically.
  */
 
-const VERSION = 'v3';
+const VERSION = 'v4';
 const ASSET_CACHE = `checklist-assets-${VERSION}`;
-const CDN_HOSTS = ['cdn.tailwindcss.com', 'cdn.jsdelivr.net'];
 
 // Only the manifest is precached, and it is 300 bytes.
 //
@@ -86,7 +85,12 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
-  if (url.origin !== self.location.origin && !CDN_HOSTS.includes(url.hostname)) return;
+  // Nothing cross-origin is fetched any more: Tailwind is built into a
+  // stylesheet and Alpine is vendored, so every request is same-origin.
+  // Refusing them outright means a future third-party script is network-only by
+  // default rather than silently cached, where it could not be validated and
+  // would survive a rollback on the CDN's side.
+  if (url.origin !== self.location.origin) return;
 
   // Authenticated traffic is never cached or served from cache. This is the
   // line that must not move: /api responses are per-user, so caching them
@@ -112,11 +116,10 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
-  // Static files and the CDN scripts the styling depends on. Cache first: the
-  // icons never change, and the Tailwind CDN is what generates all the CSS, so
-  // having it cached is what makes offline launch look right.
-  if (url.pathname.startsWith('/static/') || url.pathname === '/manifest.json'
-      || CDN_HOSTS.includes(url.hostname)) {
+  // Static files: the vendored Alpine build, the icons, the stylesheet and the
+  // manifest. Cache first, since these carry version-pinned filenames and only
+  // change when we deliberately deploy a new one.
+  if (url.pathname.startsWith('/static/') || url.pathname === '/manifest.json') {
     event.respondWith(cacheFirst(request));
   }
 });

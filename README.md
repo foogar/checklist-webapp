@@ -39,9 +39,9 @@ Tailwind CDN.
 There is a service worker at `/sw.js`, so the app is installable from the
 browser and launches in a standalone window with a home-screen icon.
 
-It caches **only** public static assets — the icons, the web app manifest, and
-the Tailwind and Alpine scripts from the CDN. It deliberately never caches the
-HTML document or any `/api/` or `/auth/` response:
+It caches **only** public static assets — the icons, the web app manifest, the
+built stylesheet and the vendored Alpine script. It deliberately never caches
+the HTML document or any `/api/` or `/auth/` response:
 
 - The page is rendered server-side with the signed-in user inlined, so a cached
   copy would leave one person's name and email in Cache Storage, readable by
@@ -60,11 +60,19 @@ offline too, so you get that message rather than a raw 502 during a restart.
 When you change `static/sw.js`, bump its `VERSION` constant. The worker then
 updates itself and purges the previous cache on its own.
 
-## Frontend styling
-Tailwind is compiled at deploy time into `static/app.css` from
-`static/app.src.css`, rather than running in the browser. This keeps roughly
-400 KB of JavaScript off the critical path and removes the flash of unstyled
-content, since the stylesheet arrives with the HTML.
+## Frontend dependencies
+Everything the page loads is served from this origin. There is no third-party
+script or stylesheet at runtime.
+
+| Asset | Source |
+|---|---|
+| Tailwind CSS | Built at deploy time into `static/app.css` from `static/app.src.css` |
+| Alpine.js | Vendored at `static/alpine-3.17.4.min.js` (MIT) |
+
+Alpine's version is pinned **in the filename**, so updating it is a deliberate
+change rather than whatever a CDN happens to serve that day. The previous
+`alpinejs@3.x.x` range was floating, meaning the code running in production
+could change without a deploy.
 
 **Rebuild after changing any class in a template**, or the change will not
 appear:
@@ -75,12 +83,12 @@ chmod +x tailwindcss-linux-x64
 ./tailwindcss-linux-x64 -i static/app.src.css -o static/app.css --minify
 ```
 
-The built `app.css` is committed, so a deploy does not have to rebuild unless
-the templates changed.
+The built `app.css` and the vendored Alpine file are both committed, so a
+deploy does not have to rebuild unless the templates changed.
 
 Two things to watch:
 
-- **Stay on Tailwind v3.** `cdn.tailwindcss.com` is v3, and v4 is a rewrite with
+- **Stay on Tailwind v3.** `cdn.tailwindcss.com` was v3, and v4 is a rewrite with
   a different configuration model and renamed utilities. Do not take a newer
   standalone release without migrating deliberately.
 - **`darkMode: 'class'` in `tailwind.config.js` is required.** The app has a
