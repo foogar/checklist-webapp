@@ -10,8 +10,10 @@ from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from authlib.integrations.starlette_client import OAuth
+from authlib.integrations.base_client.errors import OAuthError
 from starlette.middleware.sessions import SessionMiddleware
 from pydantic import BaseModel, Field
+import sqlite3
 import sys
 from typing import Literal
 
@@ -188,15 +190,40 @@ async def login(request: Request):
 
 @app.route('/auth/callback')
 async def auth_callback(request: Request):
-    token = await oauth.google.authorize_access_token(request)
+    # Without this, every OAuth failure surfaced as a bare "Internal Server
+    # Error" with the real reason buried in the server log: an unhandled
+    # exception is a 500 whether the cause was a declined consent screen, an
+    # expired code, a redirect_uri mismatch, or a CSRF state failure.
+    try:
+        token = await oauth.google.authorize_access_token(request)
+    except OAuthError as exc:
+        print(
+            f"OAuth callback failed: error={exc.error!r} description={exc.description!r}",
+            file=sys.stderr,
+        )
+        reason = exc.description or exc.error or "unknown error"
+        raise HTTPException(status_code=400, detail=f"Google sign-in failed: {reason}")
+
     user_info = token.get('userinfo')
     if not user_info:
-        raise HTTPException(status_code=400, detail="Google authentication failed")
+        print("OAuth callback: token contained no userinfo", file=sys.stderr)
+        raise HTTPException(status_code=400, detail="Google did not return account information")
 
-    email = user_info['email']
-    name = user_info.get('name', email)
+    # Read with .get rather than [] so a missing field gives a real message
+    # instead of a KeyError traceback.
+    email = user_info.get('email')
+    if not email:
+        print(f"OAuth callback: userinfo has no email, keys={sorted(user_info)}", file=sys.stderr)
+        raise HTTPException(status_code=400, detail="Google did not return an email address")
 
-    user_id = upsert_user(email, name)
+    name = user_info.get('name') or email
+
+    try:
+        user_id = upsert_user(email, name)
+    except sqlite3.Error as exc:
+        print(f"OAuth callback: database error for {email!r}: {exc}", file=sys.stderr)
+        raise HTTPException(status_code=500, detail="Could not record your account. Please try again.")
+
     start_session(request, user_id, email, name)
     return RedirectResponse(url='/', status_code=303)
 
