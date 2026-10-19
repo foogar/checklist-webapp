@@ -40,7 +40,10 @@
                 <template x-if="user">
                     <div class="flex items-center space-x-2">
                         <span class="text-xs font-medium text-gray-600 dark:text-gray-300" x-text="user.name"></span>
-                        <a href="/auth/logout" class="text-xs text-red-600 dark:text-red-400 hover:underline">Logout</a>
+                        <form method="post" action="/auth/logout" class="inline">
+                            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                            <button type="submit" class="text-xs text-red-600 dark:text-red-400 hover:underline">Logout</button>
+                        </form>
                     </div>
                 </template>
                 <template x-if="!user">

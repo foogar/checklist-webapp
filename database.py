@@ -138,6 +138,28 @@ def init_db():
     except sqlite3.IntegrityError:
         pass
 
+    # users.google_sub is the stable identity from Google. The email is not:
+    # a Workspace administrator can rename a user, which changes the address
+    # but never the sub, and keying on email would hand them a new empty
+    # account and orphan everything they owned. Added as an ALTER rather than
+    # in the CREATE above so existing databases pick it up. SQLite has no
+    # ADD COLUMN IF NOT EXISTS, so the check has to be explicit.
+    columns = {row[1] for row in cursor.execute("PRAGMA table_info(users)")}
+    if "google_sub" not in columns:
+        cursor.execute("ALTER TABLE users ADD COLUMN google_sub TEXT")
+
+    # A UNIQUE index permits many NULLs, so accounts that have not logged in
+    # since this change are all still valid here and get backfilled one at a
+    # time. Skipped if two rows already share a sub, which would mean a
+    # duplicate we should surface rather than paper over.
+    try:
+        cursor.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_google_sub "
+            "ON users(google_sub) WHERE google_sub IS NOT NULL"
+        )
+    except sqlite3.IntegrityError:
+        pass
+
     conn.commit()
     conn.close()
 

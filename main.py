@@ -1,4 +1,7 @@
 import os
+import secrets
+from urllib.parse import parse_qs
+
 from dotenv import load_dotenv
 
 # Load environment variables from a .env file if present
@@ -136,20 +139,65 @@ def claim_invites(conn, cursor, user_id, email):
     return claimed
 
 
-def upsert_user(email, name):
-    """Find or create a user by email. Shared by the OAuth callback and the
-    development login so both populate the database identically."""
+def upsert_user(email, name, google_sub=None):
+    """Find or create a user.
+
+    Identity is Google's `sub`, stable for the life of the account. The email is
+    only a bridge for accounts predating the google_sub column, and is
+    refreshed on every login so a renamed Workspace user keeps their lists
+    instead of appearing as a new person.
+    """
     email = email.strip().lower()
     conn = connect()
     cursor = conn.cursor()
-    cursor.execute("SELECT id FROM users WHERE LOWER(email) = ?", (email,))
-    row = cursor.fetchone()
-    if not row:
-        cursor.execute("INSERT INTO users (email, name) VALUES (?, ?)", (email, name))
-        conn.commit()
-        user_id = cursor.lastrowid
-    else:
-        user_id = row[0]
+    user_id = None
+
+    if google_sub:
+        cursor.execute("SELECT id, email FROM users WHERE google_sub = ?", (google_sub,))
+        row = cursor.fetchone()
+        if row:
+            user_id = row[0]
+            if name:
+                cursor.execute("UPDATE users SET name = ? WHERE id = ?", (name, user_id))
+            if row[1] != email:
+                # Another row may already hold this address, which happens when
+                # a different person claimed it before the rename. Keeping the
+                # old address beats failing the login and losing access.
+                cursor.execute(
+                    "SELECT 1 FROM users WHERE LOWER(email) = ? AND id != ?",
+                    (email, user_id),
+                )
+                if cursor.fetchone() is None:
+                    cursor.execute(
+                        "UPDATE users SET email = ? WHERE id = ?", (email, user_id)
+                    )
+                else:
+                    print(
+                        f"upsert_user: {email!r} already belongs to another account; "
+                        f"leaving user {user_id} on {row[1]!r}",
+                        file=sys.stderr,
+                    )
+
+    if user_id is None:
+        cursor.execute(
+            "SELECT id, google_sub FROM users WHERE LOWER(email) = ?", (email,)
+        )
+        row = cursor.fetchone()
+        if row:
+            user_id = row[0]
+            if google_sub and not row[1]:
+                # Backfill: first login since the column was added.
+                cursor.execute(
+                    "UPDATE users SET google_sub = ? WHERE id = ?", (google_sub, user_id)
+                )
+        else:
+            cursor.execute(
+                "INSERT INTO users (email, name, google_sub) VALUES (?, ?, ?)",
+                (email, name, google_sub),
+            )
+            user_id = cursor.lastrowid
+
+    conn.commit()
 
     # First sign-in for this address: pick up anything shared with them while
     # they did not yet have an account.
@@ -157,12 +205,18 @@ def upsert_user(email, name):
     conn.close()
     return user_id
 
+
 def start_session(request, user_id, email, name):
     request.session['user'] = {
         'id': user_id,
         'email': email,
         'name': name
     }
+    # Issued with the session and checked on the one state-changing form, so a
+    # cross-site POST cannot drive it. The session cookie is already
+    # SameSite=Lax, which covers this today, but leaning on a cookie attribute
+    # alone makes the logout fix load-bearing on that single setting.
+    request.session['csrf_token'] = secrets.token_urlsafe(32)
 
 
 # Development login bypass. Off unless explicitly enabled, and the route is a
@@ -217,10 +271,17 @@ async def auth_callback(request: Request):
         print(f"OAuth callback: userinfo has no email, keys={sorted(user_info)}", file=sys.stderr)
         raise HTTPException(status_code=400, detail="Google did not return an email address")
 
+    # Google's `sub` is the stable identity; email can change under an
+    # administrator's control and must not be what identifies the account.
+    google_sub = user_info.get('sub')
+    if not google_sub:
+        print("OAuth callback: userinfo has no sub claim", file=sys.stderr)
+        raise HTTPException(status_code=400, detail="Google did not return an account identifier")
+
     name = user_info.get('name') or email
 
     try:
-        user_id = upsert_user(email, name)
+        user_id = upsert_user(email, name, google_sub)
     except sqlite3.Error as exc:
         print(f"OAuth callback: database error for {email!r}: {exc}", file=sys.stderr)
         raise HTTPException(status_code=500, detail="Could not record your account. Please try again.")
@@ -242,12 +303,30 @@ async def dev_login(request: Request, email: str = "dev@localhost"):
     if not email or "@" not in email:
         raise HTTPException(status_code=400, detail="A valid email is required")
 
-    user_id = upsert_user(email, email.split("@")[0])
+    # No sub: this bypass never touches Google. The account is matched by
+    # email and picks up a real sub the first time they sign in properly.
+    user_id = upsert_user(email, email.split("@")[0], None)
     start_session(request, user_id, email, email.split("@")[0])
     return RedirectResponse(url='/', status_code=303)
 
-@app.get('/auth/logout')
+
+@app.post('/auth/logout')
 async def logout(request: Request):
+    """POST with a CSRF token.
+
+    This used to be a GET, which meant any page on the internet could log the
+    user out with an image tag pointing here.
+
+    The body is parsed directly rather than through request.form(), which
+    would require adding python-multipart for a single hidden field. Browsers
+    submit this form as application/x-www-form-urlencoded, and anything else
+    simply fails to produce a matching token, so the failure mode is a 403.
+    """
+    raw = (await request.body()).decode("utf-8", "replace")
+    csrf_token = (parse_qs(raw).get("csrf_token") or [""])[0]
+    expected = request.session.get("csrf_token")
+    if not expected or not secrets.compare_digest(csrf_token, expected):
+        raise HTTPException(status_code=403, detail="Invalid or missing CSRF token")
     request.session.clear()
     return RedirectResponse(url='/', status_code=303)
 
@@ -325,6 +404,7 @@ async def index(request: Request):
         "request": request,
         "user": user,
         "csp_nonce": getattr(request.state, "csp_nonce", ""),
+        "csrf_token": request.session.get("csrf_token", ""),
     })
 
 # --- API: Lists ---
