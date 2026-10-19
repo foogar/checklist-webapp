@@ -49,6 +49,10 @@ HTML document or any `/api/` or `/auth/` response:
 - API responses are per-user; caching them would serve one person's checklists
   to another, and would keep serving them after logout.
 
+Only the manifest is precached. The icons are fetched on demand and then cached,
+because they are needed just at install time — precaching them made every
+first-time visitor download hundreds of kilobytes they might never request.
+
 Tasks live on the server, so they need a connection to load. Offline the app
 opens with an amber banner saying so. A dead backend behind a proxy counts as
 offline too, so you get that message rather than a raw 502 during a restart.

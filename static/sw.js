@@ -16,15 +16,21 @@
  * worker replaces the old one automatically.
  */
 
-const VERSION = 'v2';
+const VERSION = 'v3';
 const ASSET_CACHE = `checklist-assets-${VERSION}`;
 const CDN_HOSTS = ['cdn.tailwindcss.com', 'cdn.jsdelivr.net'];
 
-// Static, public, and free of any user's data.
+// Only the manifest is precached, and it is 300 bytes.
+//
+// The icons are deliberately NOT precached. They are needed only when someone
+// actually installs the app, but an unconditional precache makes every
+// first-time visitor download them whether or not they ever do. At their
+// previous size that was 366 KB, comparable to the entire Tailwind payload.
+// The /static/ branch below already caches them on demand, so nothing is lost
+// by leaving them out: the browser fetches them at install time and the worker
+// keeps them from then on.
 const PRECACHE = [
   '/manifest.json',
-  '/static/icon-192.png',
-  '/static/icon-512.png',
 ];
 
 const OFFLINE_PAGE = `<!doctype html>
