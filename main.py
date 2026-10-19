@@ -275,6 +275,25 @@ async def manifest():
         ]
     }
 
+@app.get('/health')
+async def health():
+    """Liveness probe for the tunnel or an external monitor.
+
+    Deliberately returns 200 even if the database is unreachable. This is used
+    as an origin health check, so letting a transient lock or a brief write
+    failure flip it to an error would take a working site offline. The database
+    result is included in the body so a monitor can alert on it without the
+    probe governing availability.
+    """
+    try:
+        conn = connect()
+        conn.execute("SELECT 1").fetchone()
+        conn.close()
+        database = "ok"
+    except sqlite3.Error as exc:
+        database = f"error: {exc}"
+    return {"status": "ok", "database": database}
+
 # --- Service Worker ---
 @app.get('/sw.js')
 async def service_worker():
