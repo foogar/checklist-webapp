@@ -107,6 +107,16 @@ chmod +x tailwindcss-linux-x64
 The built `app.css` and the vendored Alpine file are both committed, so a
 deploy does not have to rebuild unless the templates changed.
 
+**No need to bump the service worker after rebuilding.** The page requests
+`/static/app.css?v=069280c5`, where the suffix is a hash of the file's contents.
+Rebuilt styles therefore arrive as a new URL, which the worker caches as a
+separate entry instead of serving the stale one. That matters because the
+worker caches `/static/*` first and otherwise you would be looking at old CSS
+with nothing in the console to explain it.
+
+Old hashed copies linger in the cache until the next `VERSION` bump. At roughly
+16 KB each that is not worth pruning between deploys.
+
 Two things to watch:
 
 - **Stay on Tailwind v3.** `cdn.tailwindcss.com` was v3, and v4 is a rewrite with

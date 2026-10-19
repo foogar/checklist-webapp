@@ -1,5 +1,6 @@
 import os
 import secrets
+import hashlib
 from urllib.parse import parse_qs
 
 from dotenv import load_dotenv
@@ -23,6 +24,23 @@ from typing import Literal
 from database import BASE_DIR, connect, init_db
 import rate_limit
 import security_headers
+
+def static_version(relative_path):
+    """Short content hash, used to bust the service worker's cached copy.
+
+    The worker caches /static/* by URL with cache-first, so a rebuilt file at
+    an unchanged path would be served stale until VERSION was bumped by hand.
+    Varying the URL by content makes a change a new cache entry instead, so
+    rebuilding the CSS needs no matching worker edit. Computed once at startup:
+    the file only changes across a restart, which is the deploy cycle anyway.
+    """
+    try:
+        return hashlib.sha256((BASE_DIR / relative_path).read_bytes()).hexdigest()[:8]
+    except OSError:
+        return "0"
+
+
+CSS_VERSION = static_version("static/app.css")
 
 # Initialize database on startup
 init_db()
@@ -405,6 +423,7 @@ async def index(request: Request):
         "user": user,
         "csp_nonce": getattr(request.state, "csp_nonce", ""),
         "csrf_token": request.session.get("csrf_token", ""),
+        "css_version": CSS_VERSION,
     })
 
 # --- API: Lists ---
