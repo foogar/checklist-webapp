@@ -1,3 +1,9 @@
+/* Slightly larger base text. Tailwind's text-* utilities are rem-based, so
+   raising the root size scales every size up together. 18px gives ~12.5%
+   bigger text without touching the hundreds of utility classes in the
+   templates. */
+html { font-size: 18px; }
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;

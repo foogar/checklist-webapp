@@ -14,9 +14,9 @@
 </head>
 <body class="bg-gray-50 dark:bg-gray-900 text-gray-900 dark:text-gray-100 min-h-screen transition-colors duration-200">
 
-    <div class="max-w-4xl mx-auto px-4 py-4 sm:py-8">
+    <div class="max-w-4xl mx-auto px-4 py-2 sm:py-4">
         <!-- Header -->
-        <header class="flex justify-between items-center mb-4 pb-3 border-b border-gray-200 dark:border-gray-800">
+        <header class="flex justify-between items-center mb-2 pb-2 border-b border-gray-200 dark:border-gray-800">
             <!-- Checklists link triggers List Overview -->
             <button @click="showOverview()" class="text-xl font-bold tracking-tight hover:text-blue-600 dark:hover:text-blue-400 transition">
                 Checklists
@@ -58,7 +58,7 @@
         <template x-if="user">
             <div>
                 <!-- Tabs & New List Button Row -->
-                <div class="mb-4 flex items-center justify-between gap-2 overflow-x-auto pb-2 border-b border-gray-200 dark:border-gray-800">
+                <div class="mb-2 flex items-center justify-between gap-2 overflow-x-auto pb-1 border-b border-gray-200 dark:border-gray-800">
                     <div class="flex items-center gap-2 flex-nowrap">
                         <!-- All Lists Overview Button -->
                         <button @click="showOverview()"
@@ -114,8 +114,8 @@
 
                 <!-- ACTIVE LIST WORKSPACE VIEW -->
                 <template x-if="activeList">
-                    <div class="bg-white dark:bg-gray-800 rounded-xl shadow-sm border border-gray-200 dark:border-gray-700 p-4">
-                        <div class="flex justify-between items-center mb-3">
+                    <div class="bg-white dark:bg-gray-800 rounded-xl shadow-sm border border-gray-200 dark:border-gray-700 p-3">
+                        <div class="flex justify-between items-center mb-2">
                             <div class="flex items-center gap-2 min-w-0">
                                 <p class="text-[11px] text-gray-500 dark:text-gray-400 truncate" x-text="activeList.is_resettable ? 'Manual Reset Daily List' : 'Standard List'"></p>
                                 <!-- Deliberately on the opposite side of the header from
@@ -144,14 +144,14 @@
                         </p>
 
                         <!-- Add Task Input -->
-                        <form @submit.prevent="addTask" class="flex gap-2 mb-3">
+                        <form @submit.prevent="addTask" class="flex gap-2 mb-2">
                             <input type="text" x-model="newTaskTitle" placeholder="Add a new item..." 
                                    class="flex-1 bg-gray-50 dark:bg-gray-900 border border-gray-300 dark:border-gray-700 rounded-lg px-3 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-blue-500">
                             <button type="submit" class="bg-blue-600 hover:bg-blue-700 text-white px-3 py-1.5 rounded-lg text-xs font-medium transition">Add</button>
                         </form>
 
                         <!-- Pending Tasks (Compacted) -->
-                        <div class="space-y-1 mb-3">
+                        <div class="space-y-1 mb-2">
                             <template x-for="(task, index) in pendingTasks" :key="task.id">
                                 <div class="flex items-center justify-between rounded-lg border border-gray-200 dark:border-gray-800 bg-gray-50 dark:bg-gray-900/50"
                                      :class="editing ? 'px-2.5 py-1.5' : 'px-1.5 py-1'">
