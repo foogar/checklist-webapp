@@ -30,14 +30,43 @@
   </header>
 
   <p class="offline-banner" id="offline-banner" role="status" hidden>
-    Offline — changes are saved on this device and sent when you reconnect.
+    Offline — checklists cannot be loaded or changed until the connection is back.
   </p>
 
   <main class="page" id="main" tabindex="-1">
-    <p class="loading" id="loading">Loading…</p>
+    <p class="loading">Loading…</p>
   </main>
 
   <div class="toasts" id="toasts" role="status" aria-live="polite"></div>
+
+  <dialog class="dialog" id="dlg-new-list">
+    <form class="dialog-body" id="form-new-list">
+      <h2>New checklist</h2>
+      <label class="field">
+        <span>Title</span>
+        <input name="title" maxlength="200" required autocomplete="off" placeholder="e.g. Daily chores">
+      </label>
+      <label class="check">
+        <input type="checkbox" name="resettable">
+        <span>Show a Reset button — useful for daily tasks</span>
+      </label>
+      <div class="dialog-actions">
+        <button type="button" class="button" data-action="close-dialog">Cancel</button>
+        <button type="submit" class="button button-primary">Create</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog class="dialog" id="dlg-confirm">
+    <div class="dialog-body">
+      <h2 data-field="title"></h2>
+      <p class="muted" data-field="message"></p>
+      <div class="dialog-actions">
+        <button type="button" class="button" data-action="close-dialog">Cancel</button>
+        <button type="button" class="button button-danger" data-action="confirm"></button>
+      </div>
+    </div>
+  </dialog>
 
   <template id="tpl-signed-out">
     <a class="button button-primary" href="/auth/login">Sign in</a>
@@ -57,6 +86,82 @@
       <p>Create, share, and tick off lists with the people you live with.</p>
       <a class="button button-primary" href="/auth/login">Sign in with Google</a>
     </section>
+  </template>
+
+  <template id="tpl-overview">
+    <section class="overview">
+      <div class="section-head">
+        <h1 class="section-title">Your checklists</h1>
+        <button type="button" class="button button-primary" data-action="new-list">New list</button>
+      </div>
+      <div class="list-grid" data-slot="lists"></div>
+      <div class="empty-state" data-slot="empty" hidden>
+        <p>No checklists yet.</p>
+        <p class="muted">Create one to get started.</p>
+      </div>
+    </section>
+  </template>
+
+  <template id="tpl-list-card">
+    <article class="list-card">
+      <button type="button" class="list-card-button" data-action="open-list">
+        <span class="list-card-top">
+          <span class="list-card-title" data-field="title"></span>
+          <span class="badge" data-field="badge" hidden>Reset</span>
+        </span>
+        <span class="list-card-meta" data-field="meta"></span>
+        <span class="list-card-count" data-field="count"></span>
+      </button>
+    </article>
+  </template>
+
+  <template id="tpl-workspace">
+    <section class="workspace">
+      <div class="workspace-head">
+        <div class="workspace-heading">
+          <h1 data-field="title"></h1>
+          <p class="muted" data-field="sub"></p>
+        </div>
+        <div class="workspace-actions">
+          <button type="button" class="button button-ghost" data-action="toggle-edit" aria-pressed="false">Edit</button>
+          <button type="button" class="button button-warn" data-action="reset" hidden>Reset</button>
+          <button type="button" class="link-button danger" data-action="delete-list" hidden>Delete</button>
+        </div>
+      </div>
+
+      <p class="hint" data-slot="edit-hint" hidden>
+        Reordering and delete controls are visible while editing.
+      </p>
+
+      <form class="add-form" data-action="add-task">
+        <label class="visually-hidden" for="new-task">New item</label>
+        <input id="new-task" name="title" placeholder="Add an item…" autocomplete="off" maxlength="500" required>
+        <button type="submit" class="button button-primary">Add</button>
+      </form>
+
+      <ul class="tasks" data-slot="pending"></ul>
+      <p class="empty" data-slot="no-pending" hidden>Nothing left. Add an item above.</p>
+
+      <section class="completed" data-slot="completed" hidden>
+        <h2 class="completed-title">Completed</h2>
+        <ul class="tasks tasks-done" data-slot="completed-list"></ul>
+      </section>
+    </section>
+  </template>
+
+  <template id="tpl-task">
+    <li class="task">
+      <label class="task-label">
+        <input type="checkbox" class="task-check">
+        <span class="task-title" data-field="title"></span>
+      </label>
+      <span class="task-meta" data-field="meta"></span>
+      <div class="task-actions">
+        <button type="button" class="icon-small" data-action="move-up" aria-label="Move up">↑</button>
+        <button type="button" class="icon-small" data-action="move-down" aria-label="Move down">↓</button>
+        <button type="button" class="icon-small danger" data-action="delete-task" aria-label="Delete item">×</button>
+      </div>
+    </li>
   </template>
 </body>
 </html>

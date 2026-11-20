@@ -47,6 +47,24 @@ def connection() -> Iterator[sqlite3.Connection]:
         conn.close()
 
 
+@contextmanager
+def transaction(conn: sqlite3.Connection) -> Iterator[None]:
+    """Run several statements atomically.
+
+    Connections use autocommit, so a multi-statement mutation (insert then bump
+    the version, or renumber every position) needs an explicit transaction.
+    BEGIN IMMEDIATE takes the write lock up front, which turns a concurrent
+    writer into a short wait instead of a failure halfway through.
+    """
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        yield
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+
+
 # --------------------------------------------------------------------------
 # Migrations
 # --------------------------------------------------------------------------

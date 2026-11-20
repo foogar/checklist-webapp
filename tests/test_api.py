@@ -323,6 +323,298 @@ class LimitTests(unittest.TestCase):
         self.assertTrue(limiter.check("auth", "k", 1, 60)[0])
 
 
+class ListApiTests(unittest.TestCase):
+    def setUp(self):
+        reset_database()
+        self.uid = create_user("owner@test.local", "Owner")
+        self.other_uid = create_user("other@test.local", "Other")
+        self.client = TestClient(main.app)
+        self.client.cookies[settings.cookie_name] = session_cookie(
+            self.uid, csrf="csrf-owner"
+        )
+        self.other = TestClient(main.app)
+        self.other.cookies[settings.cookie_name] = session_cookie(
+            self.other_uid, csrf="csrf-other"
+        )
+
+    # -- helpers -------------------------------------------------------
+
+    def post(self, path, body, client=None):
+        client = client or self.client
+        token = "csrf-owner" if client is self.client else "csrf-other"
+        return client.post(path, json_body=body, headers={"x-csrf-token": token})
+
+    def patch(self, path, body, client=None):
+        client = client or self.client
+        token = "csrf-owner" if client is self.client else "csrf-other"
+        return client.patch(path, json_body=body, headers={"x-csrf-token": token})
+
+    def delete(self, path, client=None):
+        client = client or self.client
+        token = "csrf-owner" if client is self.client else "csrf-other"
+        return client.delete(path, headers={"x-csrf-token": token})
+
+    def make_list(self, title="Chores", resettable=False):
+        response = self.post(
+            "/api/lists", {"title": title, "is_resettable": resettable}
+        )
+        self.assertEqual(response.status, 201)
+        return response.json()
+
+    def make_task(self, list_id, title="Milk"):
+        response = self.post(f"/api/lists/{list_id}/tasks", {"title": title})
+        self.assertEqual(response.status, 201)
+        return response.json()["task"]
+
+    # -- lists ---------------------------------------------------------
+
+    def test_unauthenticated_access_is_refused(self):
+        anon = TestClient(main.app)
+        self.assertEqual(anon.get("/api/lists").status, 401)
+        self.assertEqual(
+            anon.post("/api/lists", json_body={"title": "x"}).status, 401
+        )
+
+    def test_create_and_read_a_list(self):
+        created = self.make_list("Groceries", resettable=True)
+        self.assertEqual(created["title"], "Groceries")
+        self.assertTrue(created["is_resettable"])
+        self.assertEqual(created["role"], "owner")
+        self.assertEqual(created["version"], 1)
+        self.assertEqual(created["task_count"], 0)
+
+        listing = self.client.get("/api/lists").json()["lists"]
+        self.assertEqual([entry["id"] for entry in listing], [created["id"]])
+
+        single = self.client.get(f"/api/lists/{created['id']}").json()
+        self.assertEqual(single["title"], "Groceries")
+
+    def test_create_requires_csrf(self):
+        response = self.client.post("/api/lists", json_body={"title": "x"})
+        self.assertEqual(response.status, 403)
+
+    def test_cross_origin_write_is_refused(self):
+        response = self.client.post(
+            "/api/lists",
+            json_body={"title": "x"},
+            headers={"x-csrf-token": "csrf-owner", "origin": "https://evil.example"},
+        )
+        self.assertEqual(response.status, 403)
+
+    def test_title_validation(self):
+        self.assertEqual(self.post("/api/lists", {"title": ""}).status, 422)
+        self.assertEqual(self.post("/api/lists", {"title": "   "}).status, 422)
+        self.assertEqual(self.post("/api/lists", {"title": "a" * 201}).status, 422)
+        self.assertEqual(
+            self.post("/api/lists", {"title": "x", "is_resettable": "yes"}).status,
+            422,
+        )
+
+    def test_rename_requires_ownership(self):
+        created = self.make_list()
+        response = self.patch(f"/api/lists/{created['id']}", {"title": "Renamed"})
+        self.assertEqual(response.status, 200)
+        self.assertEqual(response.json()["title"], "Renamed")
+        self.assertEqual(response.json()["version"], 2)
+
+        self.assertEqual(
+            self.patch(
+                f"/api/lists/{created['id']}", {"title": "Nope"}, client=self.other
+            ).status,
+            404,
+        )
+
+    def test_delete_removes_tasks(self):
+        created = self.make_list()
+        self.make_task(created["id"])
+        self.assertEqual(self.delete(f"/api/lists/{created['id']}").status, 204)
+        self.assertEqual(self.client.get("/api/lists").json()["lists"], [])
+
+        with database.connection() as conn:
+            remaining = conn.execute(
+                "SELECT COUNT(*) FROM tasks WHERE list_id = ?", (created["id"],)
+            ).fetchone()[0]
+        self.assertEqual(remaining, 0)
+
+    def test_non_member_sees_nothing(self):
+        created = self.make_list()
+        self.assertEqual(self.other.get(f"/api/lists/{created['id']}").status, 404)
+        self.assertEqual(
+            self.other.get(f"/api/lists/{created['id']}/tasks").status, 404
+        )
+        self.assertEqual(self.other.get("/api/lists").json()["lists"], [])
+
+    # -- tasks ---------------------------------------------------------
+
+    def test_create_task_appends_and_bumps_version(self):
+        created = self.make_list()
+        first = self.make_task(created["id"], "Milk")
+        second = self.make_task(created["id"], "Bread")
+
+        self.assertEqual(first["position"], 1024)
+        self.assertEqual(second["position"], 2048)
+        self.assertEqual(first["created_by_name"], "Owner")
+
+        tasks = self.client.get(f"/api/lists/{created['id']}/tasks").json()
+        self.assertEqual([task["title"] for task in tasks["tasks"]], ["Milk", "Bread"])
+        self.assertEqual(tasks["version"], 3)  # create + two tasks
+
+    def test_task_title_validation(self):
+        created = self.make_list()
+        self.assertEqual(
+            self.post(f"/api/lists/{created['id']}/tasks", {"title": ""}).status, 422
+        )
+        self.assertEqual(
+            self.post(f"/api/lists/{created['id']}/tasks", {"title": "a" * 501}).status,
+            422,
+        )
+
+    def test_completing_a_task_records_who_and_when(self):
+        created = self.make_list()
+        task = self.make_task(created["id"])
+
+        response = self.patch(f"/api/tasks/{task['id']}", {"status": "completed"})
+        self.assertEqual(response.status, 200)
+        updated = response.json()["task"]
+        self.assertEqual(updated["status"], "completed")
+        self.assertEqual(updated["completed_by"], self.uid)
+        self.assertEqual(updated["completed_by_name"], "Owner")
+        self.assertIsNotNone(updated["completed_at"])
+
+        reverted = self.patch(f"/api/tasks/{task['id']}", {"status": "pending"}).json()
+        self.assertIsNone(reverted["task"]["completed_at"])
+        self.assertIsNone(reverted["task"]["completed_by"])
+
+    def test_invalid_status_is_refused(self):
+        created = self.make_list()
+        task = self.make_task(created["id"])
+        self.assertEqual(
+            self.patch(f"/api/tasks/{task['id']}", {"status": "evil"}).status, 422
+        )
+
+    def test_soft_delete_and_restore(self):
+        created = self.make_list()
+        task = self.make_task(created["id"])
+
+        self.assertEqual(self.delete(f"/api/tasks/{task['id']}").status, 200)
+        remaining = self.client.get(f"/api/lists/{created['id']}/tasks").json()
+        self.assertEqual(remaining["tasks"], [])
+
+        restored = self.post(f"/api/tasks/{task['id']}/restore", {})
+        self.assertEqual(restored.status, 200)
+        self.assertEqual(restored.json()["task"]["title"], "Milk")
+        again = self.client.get(f"/api/lists/{created['id']}/tasks").json()
+        self.assertEqual(len(again["tasks"]), 1)
+
+    def test_reorder_rewrites_positions(self):
+        created = self.make_list()
+        first = self.make_task(created["id"], "one")
+        second = self.make_task(created["id"], "two")
+        third = self.make_task(created["id"], "three")
+
+        response = self.post(
+            f"/api/lists/{created['id']}/reorder",
+            {"task_ids": [third["id"], first["id"], second["id"]]},
+        )
+        self.assertEqual(response.status, 200)
+
+        tasks = self.client.get(f"/api/lists/{created['id']}/tasks").json()["tasks"]
+        self.assertEqual([task["title"] for task in tasks], ["three", "one", "two"])
+        self.assertEqual([task["position"] for task in tasks], [1024, 2048, 3072])
+
+    def test_reorder_refuses_a_stale_set(self):
+        created = self.make_list()
+        first = self.make_task(created["id"], "one")
+        self.make_task(created["id"], "two")
+
+        # Omitting a task means the client's view is stale.
+        response = self.post(
+            f"/api/lists/{created['id']}/reorder", {"task_ids": [first["id"]]}
+        )
+        self.assertEqual(response.status, 409)
+        self.assertEqual(
+            self.post(
+                f"/api/lists/{created['id']}/reorder", {"task_ids": [first["id"], 9999]}
+            ).status,
+            409,
+        )
+        self.assertEqual(
+            self.post(
+                f"/api/lists/{created['id']}/reorder", {"task_ids": [first["id"], first["id"]]}
+            ).status,
+            422,
+        )
+
+    def test_reset_returns_everything_to_pending(self):
+        created = self.make_list(resettable=True)
+        task = self.make_task(created["id"])
+        self.patch(f"/api/tasks/{task['id']}", {"status": "completed"})
+
+        response = self.post(f"/api/lists/{created['id']}/reset", {})
+        self.assertEqual(response.status, 200)
+        self.assertEqual(response.json()["tasks"][0]["status"], "pending")
+        self.assertIsNone(response.json()["tasks"][0]["completed_at"])
+
+        self.assertEqual(
+            self.post(
+                f"/api/lists/{created['id']}/reset", {}, client=self.other
+            ).status,
+            404,
+        )
+
+    # -- roles and blocks ----------------------------------------------
+
+    def test_viewer_can_read_but_not_write(self):
+        created = self.make_list()
+        self.make_task(created["id"])
+        with database.connection() as conn:
+            conn.execute(
+                "INSERT INTO list_shares (list_id, user_id, role) VALUES (?, ?, 'viewer')",
+                (created["id"], self.other_uid),
+            )
+
+        self.assertEqual(
+            self.other.get(f"/api/lists/{created['id']}/tasks").status, 200
+        )
+        self.assertEqual(
+            self.post(
+                f"/api/lists/{created['id']}/tasks", {"title": "nope"}, client=self.other
+            ).status,
+            403,
+        )
+
+    def test_blocked_user_loses_access_even_with_a_share(self):
+        created = self.make_list()
+        with database.connection() as conn:
+            conn.execute(
+                "INSERT INTO list_shares (list_id, user_id, role) VALUES (?, ?, 'editor')",
+                (created["id"], self.other_uid),
+            )
+            conn.execute(
+                "INSERT INTO list_blocks (list_id, user_id) VALUES (?, ?)",
+                (created["id"], self.other_uid),
+            )
+
+        self.assertEqual(
+            self.other.get(f"/api/lists/{created['id']}/tasks").status, 404
+        )
+        self.assertEqual(self.other.get("/api/lists").json()["lists"], [])
+
+    def test_editor_can_modify(self):
+        created = self.make_list()
+        with database.connection() as conn:
+            conn.execute(
+                "INSERT INTO list_shares (list_id, user_id, role) VALUES (?, ?, 'editor')",
+                (created["id"], self.other_uid),
+            )
+        response = self.post(
+            f"/api/lists/{created['id']}/tasks", {"title": "added"}, client=self.other
+        )
+        self.assertEqual(response.status, 201)
+        listing = self.other.get("/api/lists").json()["lists"]
+        self.assertEqual(listing[0]["role"], "editor")
+
+
 class MigrationTests(unittest.TestCase):
     def test_schema_version_is_current(self):
         self.assertEqual(database.init_db(), database.SCHEMA_VERSION)

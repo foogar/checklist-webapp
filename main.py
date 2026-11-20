@@ -19,16 +19,17 @@ import re
 import sqlite3
 import sys
 import traceback
-from datetime import datetime, timezone
 from html import escape as html_escape
 from typing import Awaitable, Callable
 from urllib.parse import parse_qs
 
 import auth
 import database
+import lists_api
 import ratelimit
 import security_headers
 from config import settings
+from util import utcnow
 from web import (
     HTTPError,
     Request,
@@ -67,14 +68,6 @@ def route(method: str, pattern: str) -> Callable[[Handler], Handler]:
         return handler
 
     return register
-
-
-def utcnow() -> str:
-    return (
-        datetime.now(timezone.utc)
-        .isoformat(timespec="seconds")
-        .replace("+00:00", "Z")
-    )
 
 
 # --------------------------------------------------------------------------
@@ -340,6 +333,13 @@ async def logout(request: Request) -> Response:
     response = redirect("/")
     auth.clear_session(response)
     return response
+
+
+# --------------------------------------------------------------------------
+# API: lists and tasks
+# --------------------------------------------------------------------------
+
+lists_api.register(route)
 
 
 # --------------------------------------------------------------------------
