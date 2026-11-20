@@ -10,15 +10,20 @@ with a single integer instead of comparing rows.
 
 from __future__ import annotations
 
+import hashlib
 import re
+import secrets
 import sqlite3
+from datetime import datetime, timedelta, timezone as dt_timezone
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import auth
 import presence
+from config import settings
 from database import connection, transaction
 from util import utcnow
-from web import HTTPError, Request, Response, json_response, no_content
+from web import HTTPError, Request, Response, json_response, no_content, redirect
 
 MAX_LIST_TITLE = 200
 MAX_TASK_TITLE = 500
@@ -26,6 +31,7 @@ POSITION_STEP = 1024
 
 LIST_COLUMNS = """
     l.id, l.title, l.is_resettable, l.version, l.created_at, l.user_id,
+    l.reset_hour, l.reset_tz, l.next_reset_at,
     u.name AS owner_name,
     CASE WHEN l.user_id = :uid THEN 'owner' ELSE COALESCE(ls.role, 'viewer') END AS role,
     1 + (SELECT COUNT(*) FROM list_shares s WHERE s.list_id = l.id) AS member_count,
@@ -168,6 +174,9 @@ def _list_json(row: sqlite3.Row) -> dict[str, Any]:
         "task_count": row["task_count"],
         "pending_count": row["pending_count"],
         "created_at": row["created_at"],
+        "reset_hour": row["reset_hour"],
+        "reset_tz": row["reset_tz"],
+        "next_reset_at": row["next_reset_at"],
     }
 
 
@@ -328,6 +337,174 @@ def _if_match(request: Request) -> int | None:
 
 
 # --------------------------------------------------------------------------
+# Sharing and scheduling helpers
+# --------------------------------------------------------------------------
+
+
+def _hash_token(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def _invite_links(conn: sqlite3.Connection, list_id: int) -> list[dict[str, Any]]:
+    now = utcnow()
+    rows = conn.execute(
+        "SELECT id, role, created_at, expires_at, uses, max_uses, revoked_at "
+        "FROM invite_tokens WHERE list_id = ? ORDER BY id DESC",
+        (list_id,),
+    ).fetchall()
+    links: list[dict[str, Any]] = []
+    for row in rows:
+        active = (
+            row["revoked_at"] is None
+            and (row["expires_at"] is None or row["expires_at"] > now)
+            and row["uses"] < row["max_uses"]
+        )
+        links.append(
+            {
+                "id": row["id"],
+                "role": row["role"],
+                "created_at": row["created_at"],
+                "expires_at": row["expires_at"],
+                "uses": row["uses"],
+                "max_uses": row["max_uses"],
+                "revoked_at": row["revoked_at"],
+                "active": active,
+            }
+        )
+    return links
+
+
+def _blocks(conn: sqlite3.Connection, list_id: int) -> list[dict[str, Any]]:
+    rows = conn.execute(
+        "SELECT b.user_id, u.name, u.email, b.created_at "
+        "FROM list_blocks b JOIN users u ON u.id = b.user_id "
+        "WHERE b.list_id = ? ORDER BY LOWER(u.name), u.id",
+        (list_id,),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def _zone(name: str):
+    try:
+        return ZoneInfo(name)
+    except (ZoneInfoNotFoundError, ValueError, TypeError):
+        # Windows ships no tz database unless the optional `tzdata` wheel is
+        # installed. Production is Linux; falling back to UTC keeps the app
+        # usable in development instead of refusing to save a schedule.
+        return None
+
+
+def _next_reset(hour: int, tz_name: str) -> str:
+    tz = _zone(tz_name) or dt_timezone.utc
+    now = datetime.now(tz)
+    candidate = now.replace(hour=hour, minute=0, second=0, microsecond=0)
+    if candidate <= now:
+        candidate += timedelta(days=1)
+    return (
+        candidate.astimezone(dt_timezone.utc)
+        .isoformat(timespec="seconds")
+        .replace("+00:00", "Z")
+    )
+
+
+def _apply_due_reset(conn: sqlite3.Connection, list_id: int) -> bool:
+    """Run a scheduled reset if one is due, exactly once.
+
+    The cheap check happens outside a transaction so ordinary reads do not take
+    a write lock. The authoritative check is repeated inside it: two clients
+    polling in the same second must not both advance next_reset_at.
+    """
+    row = conn.execute(
+        "SELECT next_reset_at FROM lists WHERE id = ?", (list_id,)
+    ).fetchone()
+    if row is None or not row["next_reset_at"] or row["next_reset_at"] > utcnow():
+        return False
+
+    with transaction(conn):
+        row = conn.execute(
+            "SELECT next_reset_at, reset_hour, reset_tz FROM lists WHERE id = ?",
+            (list_id,),
+        ).fetchone()
+        now = utcnow()
+        if row is None or not row["next_reset_at"] or row["next_reset_at"] > now:
+            return False
+
+        conn.execute(
+            "UPDATE tasks SET status = 'pending', completed_at = NULL, "
+            "completed_by = NULL, updated_at = ? "
+            "WHERE list_id = ? AND deleted_at IS NULL",
+            (now, list_id),
+        )
+        _touch(conn, list_id)
+        _record(conn, list_id, None, "list.auto_reset")
+        next_at = _next_reset(int(row["reset_hour"] or 0), row["reset_tz"] or "UTC")
+        conn.execute(
+            "UPDATE lists SET next_reset_at = ? WHERE id = ?", (next_at, list_id)
+        )
+    return True
+
+
+def _claim_invite(conn: sqlite3.Connection, token: str, user_id: int) -> int:
+    row = conn.execute(
+        "SELECT * FROM invite_tokens WHERE token_hash = ?", (_hash_token(token),)
+    ).fetchone()
+    if row is None:
+        raise HTTPError(404, "This invite link is not valid.")
+
+    list_id = row["list_id"]
+    owner = conn.execute(
+        "SELECT user_id FROM lists WHERE id = ?", (list_id,)
+    ).fetchone()
+    if owner is None:
+        raise HTTPError(404, "This list no longer exists.")
+    if owner["user_id"] == user_id:
+        return list_id
+
+    blocked = conn.execute(
+        "SELECT 1 FROM list_blocks WHERE list_id = ? AND user_id = ?",
+        (list_id, user_id),
+    ).fetchone()
+    if blocked:
+        raise HTTPError(403, "You no longer have access to this list.")
+
+    existing = conn.execute(
+        "SELECT role FROM list_shares WHERE list_id = ? AND user_id = ?",
+        (list_id, user_id),
+    ).fetchone()
+    if existing:
+        # Opening a link again is not a new join, so it must not consume a use.
+        return list_id
+
+    with transaction(conn):
+        fresh = conn.execute(
+            "SELECT uses, max_uses, revoked_at, expires_at, role "
+            "FROM invite_tokens WHERE id = ?",
+            (row["id"],),
+        ).fetchone()
+        now = utcnow()
+        if fresh is None or fresh["revoked_at"] is not None:
+            raise HTTPError(410, "This invite link is no longer valid.")
+        if fresh["expires_at"] and fresh["expires_at"] <= now:
+            raise HTTPError(410, "This invite link has expired.")
+        if fresh["uses"] >= fresh["max_uses"]:
+            raise HTTPError(410, "This invite link has already been used.")
+
+        conn.execute(
+            "INSERT INTO list_shares "
+            "(list_id, user_id, role, created_at, joined_at, via_token_id) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (list_id, user_id, fresh["role"], now, now, row["id"]),
+        )
+        conn.execute(
+            "UPDATE invite_tokens SET uses = uses + 1 WHERE id = ?", (row["id"],)
+        )
+        _touch(conn, list_id)
+        _record(conn, list_id, user_id, "member.joined", detail=fresh["role"])
+
+    return list_id
+
+
+# --------------------------------------------------------------------------
 # Routes
 # --------------------------------------------------------------------------
 
@@ -337,6 +514,13 @@ def register(route) -> None:
     async def get_lists(request: Request) -> Response:
         user = auth.require_user(request)
         with connection() as conn:
+            # A scheduled reset is applied when the list is next read, so the
+            # overview counts are never a day behind.
+            for row in conn.execute(
+                f"SELECT l.id {LIST_FROM} WHERE {LIST_ACCESS}", {"uid": user["id"]}
+            ):
+                _apply_due_reset(conn, row["id"])
+
             rows = conn.execute(
                 f"SELECT {LIST_COLUMNS} {LIST_FROM} WHERE {LIST_ACCESS} "
                 "ORDER BY l.created_at DESC, l.id DESC",
@@ -389,6 +573,30 @@ def register(route) -> None:
         if "is_resettable" in data:
             assignments.append("is_resettable = ?")
             values.append(1 if _flag(data, "is_resettable") else 0)
+        if "reset_hour" in data:
+            hour = data["reset_hour"]
+            if hour is None:
+                assignments.extend(
+                    ["reset_hour = NULL", "reset_tz = NULL", "next_reset_at = NULL"]
+                )
+            else:
+                if (
+                    not isinstance(hour, int)
+                    or isinstance(hour, bool)
+                    or not 0 <= hour <= 23
+                ):
+                    raise HTTPError(
+                        422, "reset_hour must be an hour from 0 to 23, or null"
+                    )
+                tz_name = data.get("reset_tz") or "UTC"
+                if not isinstance(tz_name, str) or not re.fullmatch(
+                    r"[A-Za-z][A-Za-z0-9_+\-/]{0,63}", tz_name
+                ):
+                    raise HTTPError(422, "reset_tz must be an IANA time zone name")
+                assignments.extend(
+                    ["reset_hour = ?", "reset_tz = ?", "next_reset_at = ?"]
+                )
+                values.extend([hour, tz_name, _next_reset(hour, tz_name)])
         if not assignments:
             raise HTTPError(422, "Nothing to update")
 
@@ -435,6 +643,7 @@ def register(route) -> None:
         list_id = int(request.params["list_id"])
         with connection() as conn:
             _require(conn, list_id, user["id"])
+            _apply_due_reset(conn, list_id)
             return json_response(
                 {"version": _version(conn, list_id), "tasks": _tasks(conn, list_id)}
             )
@@ -637,6 +846,340 @@ def register(route) -> None:
             result = {"version": _version(conn, list_id), "tasks": _tasks(conn, list_id)}
         return json_response(result)
 
+    # -- sharing ----------------------------------------------------------
+
+    @route("POST", r"/api/lists/(?P<list_id>\d+)/invite-links")
+    async def create_invite_link(request: Request) -> Response:
+        user = auth.require_user(request)
+        auth.require_csrf(request)
+        list_id = int(request.params["list_id"])
+        data = _body(request)
+
+        role = data.get("role", "editor")
+        if role not in {"editor", "viewer"}:
+            raise HTTPError(422, "role must be 'editor' or 'viewer'")
+
+        max_uses = data.get("max_uses", 1)
+        if (
+            not isinstance(max_uses, int)
+            or isinstance(max_uses, bool)
+            or not 1 <= max_uses <= 100
+        ):
+            raise HTTPError(422, "max_uses must be between 1 and 100")
+
+        days = data.get("expires_in_days", 7)
+        if (
+            not isinstance(days, int)
+            or isinstance(days, bool)
+            or not 1 <= days <= 90
+        ):
+            raise HTTPError(422, "expires_in_days must be between 1 and 90")
+
+        token = secrets.token_urlsafe(32)
+        expires_at = (
+            datetime.now(dt_timezone.utc) + timedelta(days=days)
+        ).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+        with connection() as conn:
+            if _require(conn, list_id, user["id"]) != "owner":
+                raise HTTPError(403, "Only the owner can create invite links")
+            with transaction(conn):
+                cursor = conn.execute(
+                    "INSERT INTO invite_tokens "
+                    "(token_hash, list_id, role, created_by, created_at, "
+                    "expires_at, max_uses) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        _hash_token(token),
+                        list_id,
+                        role,
+                        user["id"],
+                        utcnow(),
+                        expires_at,
+                        max_uses,
+                    ),
+                )
+                link_id = cursor.lastrowid
+                _record(conn, list_id, user["id"], "invite.created", detail=role)
+
+        return json_response(
+            {
+                "id": link_id,
+                "url": f"{settings.public_base_url}/join/{token}",
+                "role": role,
+                "expires_at": expires_at,
+                "uses": 0,
+                "max_uses": max_uses,
+                "active": True,
+            },
+            status=201,
+        )
+
+    @route("GET", r"/api/lists/(?P<list_id>\d+)/invite-links")
+    async def get_invite_links(request: Request) -> Response:
+        user = auth.require_user(request)
+        list_id = int(request.params["list_id"])
+        with connection() as conn:
+            if _require(conn, list_id, user["id"]) != "owner":
+                raise HTTPError(403, "Only the owner can see invite links")
+            return json_response({"links": _invite_links(conn, list_id)})
+
+    @route("DELETE", r"/api/lists/(?P<list_id>\d+)/invite-links/(?P<link_id>\d+)")
+    async def revoke_invite_link(request: Request) -> Response:
+        user = auth.require_user(request)
+        auth.require_csrf(request)
+        list_id = int(request.params["list_id"])
+        link_id = int(request.params["link_id"])
+
+        with connection() as conn:
+            if _require(conn, list_id, user["id"]) != "owner":
+                raise HTTPError(403, "Only the owner can revoke invite links")
+            row = conn.execute(
+                "SELECT 1 FROM invite_tokens WHERE id = ? AND list_id = ?",
+                (link_id, list_id),
+            ).fetchone()
+            if row is None:
+                raise HTTPError(404, "Invite link not found")
+            with transaction(conn):
+                conn.execute(
+                    "UPDATE invite_tokens SET revoked_at = ? WHERE id = ?",
+                    (utcnow(), link_id),
+                )
+                _touch(conn, list_id)
+                _record(conn, list_id, user["id"], "invite.revoked")
+        return no_content()
+
+    @route("PATCH", r"/api/lists/(?P<list_id>\d+)/members/(?P<user_id>\d+)")
+    async def update_member(request: Request) -> Response:
+        user = auth.require_user(request)
+        auth.require_csrf(request)
+        list_id = int(request.params["list_id"])
+        target = int(request.params["user_id"])
+        data = _body(request)
+
+        role = data.get("role")
+        if role not in {"editor", "viewer"}:
+            raise HTTPError(422, "role must be 'editor' or 'viewer'")
+
+        with connection() as conn:
+            if _require(conn, list_id, user["id"]) != "owner":
+                raise HTTPError(403, "Only the owner can change roles")
+            owner = conn.execute(
+                "SELECT user_id FROM lists WHERE id = ?", (list_id,)
+            ).fetchone()
+            if owner is None:
+                raise HTTPError(404, "List not found")
+            if owner["user_id"] == target:
+                raise HTTPError(400, "The owner's role cannot be changed")
+            share = conn.execute(
+                "SELECT 1 FROM list_shares WHERE list_id = ? AND user_id = ?",
+                (list_id, target),
+            ).fetchone()
+            if share is None:
+                raise HTTPError(404, "That person is not a member")
+            with transaction(conn):
+                conn.execute(
+                    "UPDATE list_shares SET role = ? WHERE list_id = ? AND user_id = ?",
+                    (role, list_id, target),
+                )
+                _touch(conn, list_id)
+                _record(conn, list_id, user["id"], "member.role", detail=role)
+        return json_response({"success": True})
+
+    @route("DELETE", r"/api/lists/(?P<list_id>\d+)/members/(?P<user_id>\d+)")
+    async def remove_member(request: Request) -> Response:
+        user = auth.require_user(request)
+        auth.require_csrf(request)
+        list_id = int(request.params["list_id"])
+        target = int(request.params["user_id"])
+
+        with connection() as conn:
+            if _require(conn, list_id, user["id"]) != "owner":
+                raise HTTPError(403, "Only the owner can remove members")
+            owner = conn.execute(
+                "SELECT user_id FROM lists WHERE id = ?", (list_id,)
+            ).fetchone()
+            if owner is None:
+                raise HTTPError(404, "List not found")
+            if owner["user_id"] == target:
+                raise HTTPError(400, "The owner cannot be removed")
+            share = conn.execute(
+                "SELECT 1 FROM list_shares WHERE list_id = ? AND user_id = ?",
+                (list_id, target),
+            ).fetchone()
+            if share is None:
+                raise HTTPError(404, "That person is not a member")
+
+            person = conn.execute(
+                "SELECT name FROM users WHERE id = ?", (target,)
+            ).fetchone()
+            with transaction(conn):
+                conn.execute(
+                    "DELETE FROM list_shares WHERE list_id = ? AND user_id = ?",
+                    (list_id, target),
+                )
+                # Sticky removal: a link that is still circulating must not be
+                # a way back in.
+                conn.execute(
+                    "INSERT OR REPLACE INTO list_blocks "
+                    "(list_id, user_id, blocked_by, created_at) VALUES (?, ?, ?, ?)",
+                    (list_id, target, user["id"], utcnow()),
+                )
+                _touch(conn, list_id)
+                _record(
+                    conn,
+                    list_id,
+                    user["id"],
+                    "member.removed",
+                    detail=person["name"] if person else None,
+                )
+        return no_content()
+
+    @route("DELETE", r"/api/lists/(?P<list_id>\d+)/blocks/(?P<user_id>\d+)")
+    async def unblock_member(request: Request) -> Response:
+        user = auth.require_user(request)
+        auth.require_csrf(request)
+        list_id = int(request.params["list_id"])
+        target = int(request.params["user_id"])
+
+        with connection() as conn:
+            if _require(conn, list_id, user["id"]) != "owner":
+                raise HTTPError(403, "Only the owner can unblock people")
+            row = conn.execute(
+                "SELECT 1 FROM list_blocks WHERE list_id = ? AND user_id = ?",
+                (list_id, target),
+            ).fetchone()
+            if row is None:
+                raise HTTPError(404, "That person is not blocked")
+            person = conn.execute(
+                "SELECT name FROM users WHERE id = ?", (target,)
+            ).fetchone()
+            with transaction(conn):
+                conn.execute(
+                    "DELETE FROM list_blocks WHERE list_id = ? AND user_id = ?",
+                    (list_id, target),
+                )
+                _touch(conn, list_id)
+                _record(
+                    conn,
+                    list_id,
+                    user["id"],
+                    "member.unblocked",
+                    detail=person["name"] if person else None,
+                )
+        return no_content()
+
+    @route("GET", r"/join/(?P<token>[A-Za-z0-9_-]{20,64})")
+    async def join(request: Request) -> Response:
+        token = request.params["token"]
+        user = auth.current_user(request)
+        if user is None:
+            # Sign in first, then come back here. `next` is carried in the
+            # signed OAuth state cookie, so it cannot be tampered with.
+            return redirect(f"/auth/login?next=/join/{token}", status=302)
+
+        with connection() as conn:
+            list_id = _claim_invite(conn, token, user["id"])
+        return redirect(f"/#/list/{list_id}")
+
+    # -- export / import --------------------------------------------------
+
+    @route("GET", r"/api/lists/(?P<list_id>\d+)/export")
+    async def export_list(request: Request) -> Response:
+        user = auth.require_user(request)
+        list_id = int(request.params["list_id"])
+
+        with connection() as conn:
+            _require(conn, list_id, user["id"])
+            row = conn.execute(
+                "SELECT title, is_resettable, reset_hour, reset_tz "
+                "FROM lists WHERE id = ?",
+                (list_id,),
+            ).fetchone()
+            tasks = _tasks(conn, list_id)
+
+        payload = {
+            "format": "checklist-v2",
+            "exported_at": utcnow(),
+            "list": {
+                "title": row["title"],
+                "is_resettable": bool(row["is_resettable"]),
+                "reset_hour": row["reset_hour"],
+                "reset_tz": row["reset_tz"],
+            },
+            "tasks": [
+                {
+                    "title": task["title"],
+                    "status": task["status"],
+                    "position": task["position"],
+                    "created_at": task["created_at"],
+                    "completed_at": task["completed_at"],
+                }
+                for task in tasks
+            ],
+        }
+        safe_name = re.sub(r"[^A-Za-z0-9_-]+", "-", row["title"]).strip("-")
+        filename = (safe_name or "checklist") + ".json"
+        return json_response(
+            payload,
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+
+    @route("POST", r"/api/import")
+    async def import_list(request: Request) -> Response:
+        user = auth.require_user(request)
+        auth.require_csrf(request)
+        data = _body(request)
+
+        source = data.get("list")
+        if not isinstance(source, dict):
+            raise HTTPError(422, "list must be an object")
+        title = _text(source, "title", MAX_LIST_TITLE)
+        resettable = source.get("is_resettable") is True
+
+        tasks = data.get("tasks", [])
+        if not isinstance(tasks, list):
+            raise HTTPError(422, "tasks must be a list")
+        if len(tasks) > 1000:
+            raise HTTPError(422, "An import is limited to 1000 items")
+
+        with connection() as conn:
+            with transaction(conn):
+                cursor = conn.execute(
+                    "INSERT INTO lists "
+                    "(user_id, title, is_resettable, created_at, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (user["id"], title, 1 if resettable else 0, utcnow(), utcnow()),
+                )
+                list_id = cursor.lastrowid
+
+                for index, task in enumerate(tasks, start=1):
+                    if not isinstance(task, dict):
+                        raise HTTPError(422, "Every task must be an object")
+                    task_title = _text(task, "title", MAX_TASK_TITLE)
+                    status = task.get("status")
+                    if status not in {"pending", "completed"}:
+                        status = "pending"
+                    conn.execute(
+                        "INSERT INTO tasks "
+                        "(list_id, title, status, position, created_by, "
+                        "created_at, updated_at) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        (
+                            list_id,
+                            task_title,
+                            status,
+                            index * POSITION_STEP,
+                            user["id"],
+                            utcnow(),
+                            utcnow(),
+                        ),
+                    )
+
+                _record(conn, list_id, user["id"], "list.imported", detail=title)
+            result = _fetch_list(conn, list_id, user["id"])
+
+        return json_response({"list": result, "imported": len(tasks)}, status=201)
+
     @route("GET", r"/api/lists/(?P<list_id>\d+)/state")
     async def get_state(request: Request) -> Response:
         """Everything the workspace needs, or 304 if nothing changed.
@@ -660,6 +1203,7 @@ def register(route) -> None:
 
         with connection() as conn:
             role = _require(conn, list_id, user["id"])
+            _apply_due_reset(conn, list_id)
             version = _version(conn, list_id)
             etag = f'W/"{version}"'
 
@@ -682,4 +1226,7 @@ def register(route) -> None:
                 "presence": presence.snapshot(list_id),
                 "server_time": utcnow(),
             }
+            if role == "owner":
+                payload["invite_links"] = _invite_links(conn, list_id)
+                payload["blocks"] = _blocks(conn, list_id)
         return json_response(payload, headers={"ETag": etag})

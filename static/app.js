@@ -23,6 +23,10 @@ const state = {
   version: 0,
   activity: [],
   presence: [],
+  members: [],
+  inviteLinks: [],
+  blocks: [],
+  newInviteUrl: "",
   activityOpen: false,
   editing: false,
   // Preserved across re-renders so toggling a task cannot eat a half-typed
@@ -45,6 +49,11 @@ const dom = {
   newListDialog: document.getElementById("dlg-new-list"),
   newListForm: document.getElementById("form-new-list"),
   confirmDialog: document.getElementById("dlg-confirm"),
+  shareDialog: document.getElementById("dlg-share"),
+  settingsDialog: document.getElementById("dlg-settings"),
+  inviteForm: document.getElementById("form-invite"),
+  settingsForm: document.getElementById("form-settings"),
+  importFile: document.getElementById("import-file"),
 };
 
 const templates = {
@@ -303,6 +312,9 @@ function renderWorkspace() {
   const deleteButton = section.querySelector('[data-action="delete-list"]');
   deleteButton.hidden = list.role !== "owner";
 
+  section.querySelector('[data-action="share"]').hidden = list.role !== "owner";
+  section.querySelector('[data-action="settings"]').hidden = list.role !== "owner";
+
   const form = section.querySelector('[data-action="add-task"]');
   if (list.role === "viewer") {
     form.hidden = true;
@@ -397,6 +409,22 @@ function activityText(entry) {
       return `${who} changed the reset setting`;
     case "list.reset":
       return `${who} reset the list`;
+    case "list.imported":
+      return `${who} imported “${entry.detail}”`;
+    case "list.auto_reset":
+      return "The list reset automatically";
+    case "invite.created":
+      return `${who} created an invite link`;
+    case "invite.revoked":
+      return `${who} revoked an invite link`;
+    case "member.joined":
+      return `${who} joined the list`;
+    case "member.removed":
+      return `${who} removed ${entry.detail || "someone"}`;
+    case "member.role":
+      return `${who} changed a role to ${entry.detail}`;
+    case "member.unblocked":
+      return `${who} allowed ${entry.detail || "someone"} back`;
     case "task.added":
       return `${who} added ${subject}`;
     case "task.completed":
@@ -492,6 +520,9 @@ function applyState(data, { render: shouldRender = true } = {}) {
   state.tasks = data.tasks;
   state.activity = data.activity || [];
   state.presence = data.presence || [];
+  state.members = data.members || [];
+  state.inviteLinks = data.invite_links || [];
+  state.blocks = data.blocks || [];
 
   const index = state.lists.findIndex((entry) => entry.id === data.list.id);
   if (index === -1) state.lists.push(data.list);
@@ -843,6 +874,301 @@ function toggleEdit() {
   if (button) button.focus();
 }
 
+// ------------------------------------------------------------------ sharing
+
+function formatDate(iso) {
+  if (!iso) return "";
+  const date = new Date(iso);
+  if (!Number.isFinite(date.getTime())) return "";
+  return date.toLocaleDateString();
+}
+
+async function copyText(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch (error) {
+    return false;
+  }
+}
+
+function buildMember(member) {
+  const row = document.createElement("li");
+  row.className = "member";
+
+  const name = document.createElement("span");
+  name.className = "member-name";
+  name.textContent = member.name || member.email || "Someone";
+  if (member.email) {
+    const email = document.createElement("span");
+    email.className = "muted";
+    email.textContent = member.email;
+    name.append(email);
+  }
+  row.append(name);
+
+  if (member.role === "owner") {
+    const badge = document.createElement("span");
+    badge.className = "badge";
+    badge.textContent = "Owner";
+    row.append(badge);
+    return row;
+  }
+
+  const select = document.createElement("select");
+  select.dataset.action = "member-role";
+  select.dataset.userId = String(member.user_id);
+  select.setAttribute("aria-label", `Role for ${member.name || member.email}`);
+  for (const [value, label] of [
+    ["editor", "Can edit"],
+    ["viewer", "Can view"],
+  ]) {
+    const option = document.createElement("option");
+    option.value = value;
+    option.textContent = label;
+    option.selected = member.role === value;
+    select.append(option);
+  }
+  row.append(select);
+
+  const remove = document.createElement("button");
+  remove.type = "button";
+  remove.className = "link-button danger";
+  remove.dataset.action = "remove-member";
+  remove.dataset.userId = String(member.user_id);
+  remove.textContent = "Remove";
+  row.append(remove);
+
+  return row;
+}
+
+function buildBlocked(person) {
+  const row = document.createElement("li");
+  row.className = "member";
+
+  const name = document.createElement("span");
+  name.className = "member-name";
+  name.textContent = person.name || person.email || "Someone";
+  if (person.email) {
+    const email = document.createElement("span");
+    email.className = "muted";
+    email.textContent = person.email;
+    name.append(email);
+  }
+  row.append(name);
+
+  const allow = document.createElement("button");
+  allow.type = "button";
+  allow.className = "link-button";
+  allow.dataset.action = "unblock-member";
+  allow.dataset.userId = String(person.user_id);
+  allow.textContent = "Allow back";
+  row.append(allow);
+
+  return row;
+}
+
+function buildLink(link) {
+  const row = document.createElement("li");
+  row.className = "link-row";
+
+  const label = document.createElement("span");
+  const role = link.role === "viewer" ? "Can view" : "Can edit";
+  let stateText;
+  if (link.active) {
+    stateText = `${link.uses}/${link.max_uses} used · expires ${formatDate(link.expires_at)}`;
+  } else if (link.revoked_at) {
+    stateText = "Revoked";
+  } else if (link.uses >= link.max_uses) {
+    stateText = "Used up";
+  } else {
+    stateText = "Expired";
+  }
+  label.textContent = `${role} · ${stateText}`;
+  row.append(label);
+
+  if (link.active) {
+    const revoke = document.createElement("button");
+    revoke.type = "button";
+    revoke.className = "link-button danger";
+    revoke.dataset.action = "revoke-link";
+    revoke.dataset.linkId = String(link.id);
+    revoke.textContent = "Revoke";
+    row.append(revoke);
+  }
+
+  return row;
+}
+
+function renderShare() {
+  const list = currentList();
+  if (!list) return;
+
+  dom.shareDialog.querySelector('[data-field="title"]').textContent = list.title;
+
+  const members = dom.shareDialog.querySelector('[data-slot="members"]');
+  members.replaceChildren();
+  for (const member of state.members) members.append(buildMember(member));
+
+  const blockedSection = dom.shareDialog.querySelector('[data-slot="blocked-section"]');
+  const blockedList = dom.shareDialog.querySelector('[data-slot="blocked"]');
+  blockedList.replaceChildren();
+  blockedSection.hidden = state.blocks.length === 0;
+  for (const person of state.blocks) blockedList.append(buildBlocked(person));
+
+  const newLink = dom.shareDialog.querySelector('[data-slot="new-link"]');
+  newLink.hidden = !state.newInviteUrl;
+  if (state.newInviteUrl) {
+    newLink.querySelector('[data-field="url"]').value = state.newInviteUrl;
+  }
+
+  const links = dom.shareDialog.querySelector('[data-slot="links"]');
+  links.replaceChildren();
+  for (const link of state.inviteLinks) links.append(buildLink(link));
+}
+
+async function refreshShareState() {
+  if (state.activeId === null) return;
+  try {
+    const data = await apiJson(`/api/lists/${state.activeId}/state`);
+    if (!data) return;
+    applyState(data, { render: false });
+    render();
+    renderShare();
+  } catch (error) {
+    toast(error.message);
+  }
+}
+
+async function openShareDialog() {
+  const list = currentList();
+  if (!list || list.role !== "owner") return;
+  state.newInviteUrl = "";
+  renderShare();
+  dom.shareDialog.showModal();
+  await refreshShareState();
+}
+
+async function createInviteLink(form) {
+  const list = currentList();
+  if (!list) return;
+  try {
+    const link = await apiJson(`/api/lists/${list.id}/invite-links`, {
+      method: "POST",
+      body: {
+        role: form.elements.role.value,
+        expires_in_days: Number(form.elements.expires_in_days.value),
+        max_uses: Number(form.elements.max_uses.value),
+      },
+    });
+    state.newInviteUrl = link.url;
+    state.inviteLinks.unshift(link);
+    renderShare();
+    const copied = await copyText(link.url);
+    toast(copied ? "Invite link created and copied" : "Invite link created");
+  } catch (error) {
+    toast(error.message);
+  }
+}
+
+async function copyInviteLink() {
+  const input = dom.shareDialog.querySelector('[data-field="url"]');
+  if (!input) return;
+  const copied = await copyText(input.value);
+  if (copied) {
+    toast("Link copied");
+  } else {
+    input.select();
+    toast("Press Ctrl+C to copy the link");
+  }
+}
+
+// ----------------------------------------------------------------- settings
+
+function updateResetTimeVisibility() {
+  const enabled = dom.settingsForm.elements.auto_reset.checked;
+  dom.settingsForm.querySelector('[data-slot="reset-time"]').hidden = !enabled;
+}
+
+function openSettings() {
+  const list = currentList();
+  if (!list || list.role !== "owner") return;
+
+  const form = dom.settingsForm;
+  form.reset();
+  form.elements.title.value = list.title;
+  form.elements.is_resettable.checked = list.is_resettable;
+
+  const scheduled = list.reset_hour !== null && list.reset_hour !== undefined;
+  form.elements.auto_reset.checked = scheduled;
+  form.elements.reset_time.value = scheduled
+    ? `${String(list.reset_hour).padStart(2, "0")}:00`
+    : "04:00";
+  updateResetTimeVisibility();
+
+  form.querySelector('[data-slot="export"]').href = `/api/lists/${list.id}/export`;
+  dom.settingsDialog.showModal();
+}
+
+async function saveSettings(form) {
+  const list = currentList();
+  if (!list) return;
+
+  const auto = form.elements.auto_reset.checked;
+  const time = form.elements.reset_time.value || "04:00";
+  const hour = Number(time.split(":")[0]);
+
+  try {
+    const updated = await apiJson(`/api/lists/${list.id}`, {
+      method: "PATCH",
+      body: {
+        title: form.elements.title.value.trim(),
+        is_resettable: form.elements.is_resettable.checked,
+        reset_hour: auto ? hour : null,
+        reset_tz: auto
+          ? Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC"
+          : "UTC",
+      },
+    });
+    const index = state.lists.findIndex((entry) => entry.id === updated.id);
+    if (index === -1) state.lists.push(updated);
+    else state.lists[index] = updated;
+    dom.settingsDialog.close();
+    render();
+    toast("Settings saved");
+  } catch (error) {
+    toast(error.message);
+  }
+}
+
+// ------------------------------------------------------------------- import
+
+function openImportPicker() {
+  dom.importFile.value = "";
+  dom.importFile.click();
+}
+
+async function importList(file) {
+  if (!file) return;
+
+  let payload;
+  try {
+    payload = JSON.parse(await file.text());
+  } catch (error) {
+    toast("That file is not valid JSON.");
+    return;
+  }
+
+  try {
+    const result = await apiJson("/api/import", { method: "POST", body: payload });
+    await refreshLists();
+    await openList(result.list.id);
+    toast(`Imported ${result.imported} items`);
+  } catch (error) {
+    toast(error.message);
+  }
+}
+
 // ------------------------------------------------------------------- dialogs
 
 let confirmResolve = null;
@@ -925,6 +1251,15 @@ function wireEvents() {
       case "toggle-edit":
         toggleEdit();
         break;
+      case "share":
+        await openShareDialog();
+        break;
+      case "settings":
+        openSettings();
+        break;
+      case "import":
+        openImportPicker();
+        break;
       case "reset":
         await resetList();
         break;
@@ -959,6 +1294,117 @@ function wireEvents() {
 
   dom.main.addEventListener("input", (event) => {
     if (event.target.id === "new-task") state.draft = event.target.value;
+  });
+
+  // -- sharing dialog --------------------------------------------------
+
+  dom.shareDialog.addEventListener("click", async (event) => {
+    const target = event.target.closest("[data-action]");
+    if (!target) return;
+
+    switch (target.dataset.action) {
+      case "copy-link":
+        await copyInviteLink();
+        break;
+      case "remove-member": {
+        const userId = Number(target.dataset.userId);
+        const member = state.members.find((entry) => entry.user_id === userId);
+        const confirmed = await confirmAction({
+          title: `Remove ${member ? member.name || member.email : "this person"}?`,
+          message:
+            "They lose access immediately and cannot rejoin with a link until you allow them back.",
+          confirmLabel: "Remove",
+        });
+        if (!confirmed) return;
+        try {
+          await apiJson(`/api/lists/${state.activeId}/members/${userId}`, {
+            method: "DELETE",
+          });
+          await refreshShareState();
+          toast("Access removed");
+        } catch (error) {
+          toast(error.message);
+        }
+        break;
+      }
+      case "unblock-member": {
+        const userId = Number(target.dataset.userId);
+        try {
+          await apiJson(`/api/lists/${state.activeId}/blocks/${userId}`, {
+            method: "DELETE",
+          });
+          await refreshShareState();
+          toast("They can rejoin with a valid link");
+        } catch (error) {
+          toast(error.message);
+        }
+        break;
+      }
+      case "revoke-link": {
+        const linkId = Number(target.dataset.linkId);
+        const confirmed = await confirmAction({
+          title: "Revoke this link?",
+          message: "Anyone who has not joined yet will not be able to use it.",
+          confirmLabel: "Revoke",
+        });
+        if (!confirmed) return;
+        try {
+          await apiJson(
+            `/api/lists/${state.activeId}/invite-links/${linkId}`,
+            { method: "DELETE" }
+          );
+          state.newInviteUrl = "";
+          await refreshShareState();
+          toast("Link revoked");
+        } catch (error) {
+          toast(error.message);
+        }
+        break;
+      }
+      default:
+        break;
+    }
+  });
+
+  dom.shareDialog.addEventListener("change", async (event) => {
+    const select = event.target.closest('[data-action="member-role"]');
+    if (!select) return;
+    try {
+      await apiJson(
+        `/api/lists/${state.activeId}/members/${select.dataset.userId}`,
+        { method: "PATCH", body: { role: select.value } }
+      );
+      await refreshShareState();
+      toast("Role updated");
+    } catch (error) {
+      toast(error.message);
+      renderShare();
+    }
+  });
+
+  dom.shareDialog.addEventListener("close", () => {
+    state.newInviteUrl = "";
+  });
+
+  dom.inviteForm.addEventListener("submit", (event) => {
+    event.preventDefault();
+    createInviteLink(dom.inviteForm);
+  });
+
+  // -- settings dialog -------------------------------------------------
+
+  dom.settingsForm.addEventListener("submit", (event) => {
+    event.preventDefault();
+    saveSettings(dom.settingsForm);
+  });
+
+  dom.settingsForm.elements.auto_reset.addEventListener(
+    "change",
+    updateResetTimeVisibility
+  );
+
+  dom.importFile.addEventListener("change", () => {
+    importList(dom.importFile.files[0]);
   });
 
   window.addEventListener("online", async () => {

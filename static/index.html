@@ -68,6 +68,92 @@
     </div>
   </dialog>
 
+  <dialog class="dialog dialog-wide" id="dlg-share">
+    <div class="dialog-body">
+      <h2>Share “<span data-field="title"></span>”</h2>
+
+      <section class="share-section">
+        <h3>People</h3>
+        <ul class="member-list" data-slot="members"></ul>
+      </section>
+
+      <section class="share-section" data-slot="blocked-section" hidden>
+        <h3>Removed</h3>
+        <ul class="member-list" data-slot="blocked"></ul>
+      </section>
+
+      <section class="share-section">
+        <h3>Invite link</h3>
+        <form class="invite-form" id="form-invite">
+          <label class="field-inline">
+            <span>Role</span>
+            <select name="role">
+              <option value="editor">Can edit</option>
+              <option value="viewer">Can view</option>
+            </select>
+          </label>
+          <label class="field-inline">
+            <span>Expires</span>
+            <select name="expires_in_days">
+              <option value="1">1 day</option>
+              <option value="7" selected>7 days</option>
+              <option value="30">30 days</option>
+            </select>
+          </label>
+          <label class="field-inline">
+            <span>Uses</span>
+            <input type="number" name="max_uses" min="1" max="100" value="1">
+          </label>
+          <button type="submit" class="button button-primary">Create link</button>
+        </form>
+
+        <div class="invite-result" data-slot="new-link" hidden>
+          <label class="field">
+            <span>Copy this link</span>
+            <input type="text" readonly data-field="url">
+          </label>
+          <button type="button" class="button" data-action="copy-link">Copy</button>
+        </div>
+
+        <ul class="link-list" data-slot="links"></ul>
+      </section>
+
+      <div class="dialog-actions">
+        <button type="button" class="button" data-action="close-dialog">Done</button>
+      </div>
+    </div>
+  </dialog>
+
+  <dialog class="dialog" id="dlg-settings">
+    <form class="dialog-body" id="form-settings">
+      <h2>List settings</h2>
+      <label class="field">
+        <span>Title</span>
+        <input name="title" maxlength="200" required autocomplete="off">
+      </label>
+      <label class="check">
+        <input type="checkbox" name="is_resettable">
+        <span>Show a Reset button</span>
+      </label>
+      <label class="check">
+        <input type="checkbox" name="auto_reset">
+        <span>Reset automatically every day</span>
+      </label>
+      <label class="field" data-slot="reset-time" hidden>
+        <span>Reset at</span>
+        <input type="time" name="reset_time" value="04:00">
+      </label>
+      <div class="dialog-actions">
+        <a class="button" data-slot="export" href="#">Export JSON</a>
+        <span class="dialog-spacer"></span>
+        <button type="button" class="button" data-action="close-dialog">Cancel</button>
+        <button type="submit" class="button button-primary">Save</button>
+      </div>
+    </form>
+  </dialog>
+
+  <input type="file" id="import-file" accept="application/json,.json" hidden>
+
   <template id="tpl-signed-out">
     <a class="button button-primary" href="/auth/login">Sign in</a>
   </template>
@@ -92,7 +178,10 @@
     <section class="overview">
       <div class="section-head">
         <h1 class="section-title">Your checklists</h1>
-        <button type="button" class="button button-primary" data-action="new-list">New list</button>
+        <div class="section-actions">
+          <button type="button" class="button button-ghost" data-action="import">Import</button>
+          <button type="button" class="button button-primary" data-action="new-list">New list</button>
+        </div>
       </div>
       <div class="list-grid" data-slot="lists"></div>
       <div class="empty-state" data-slot="empty" hidden>
@@ -124,6 +213,8 @@
         </div>
         <div class="workspace-actions">
           <button type="button" class="button button-ghost" data-action="toggle-edit" aria-pressed="false">Edit</button>
+          <button type="button" class="button button-ghost" data-action="share" hidden>Share</button>
+          <button type="button" class="button button-ghost" data-action="settings" hidden>Settings</button>
           <button type="button" class="button button-warn" data-action="reset" hidden>Reset</button>
           <button type="button" class="link-button danger" data-action="delete-list" hidden>Delete</button>
         </div>

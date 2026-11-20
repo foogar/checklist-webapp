@@ -311,7 +311,9 @@ async def dev_login(request: Request) -> Response:
     with database.connection() as conn:
         user_id = auth.upsert_user(conn, email, email.split("@")[0], None)
 
-    response = redirect("/")
+    # Honouring `next` lets a developer walk an invite link end to end without
+    # a Google round trip.
+    response = redirect(auth.safe_next(request.query.get("next", [""])[0]))
     auth.start_session(response, user_id)
     return response
 

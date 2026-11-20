@@ -286,7 +286,7 @@ def _redirect_uri() -> str:
     return f"{settings.public_base_url}/auth/callback"
 
 
-def _safe_next(value: str | None) -> str:
+def safe_next(value: str | None) -> str:
     """Only allow same-origin relative paths, so ?next= cannot be an open redirect."""
     if not value or not value.startswith("/"):
         return "/"
@@ -322,7 +322,7 @@ def build_login(request: Request) -> tuple[str, str]:
         {
             "state": state,
             "verifier": verifier,
-            "next": _safe_next(request.query.get("next", [""])[0]),
+            "next": safe_next(request.query.get("next", [""])[0]),
             "exp": int(time.time()) + OAUTH_STATE_MAX_AGE,
         }
     )
@@ -383,7 +383,7 @@ async def exchange_code(request: Request) -> tuple[dict[str, Any], str]:
     )
     userinfo = await asyncio.to_thread(_http_json, userinfo_request)
 
-    return userinfo, _safe_next(str(state_payload.get("next", "/")))
+    return userinfo, safe_next(str(state_payload.get("next", "/")))
 
 
 def user_from_userinfo(userinfo: dict[str, Any]) -> tuple[str, str, str]:

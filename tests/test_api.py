@@ -43,6 +43,7 @@ import presence  # noqa: E402
 import ratelimit  # noqa: E402
 from config import settings  # noqa: E402
 from asgi_client import TestClient  # noqa: E402
+from util import utcnow  # noqa: E402
 
 TABLES = (
     "activity",
@@ -717,6 +718,341 @@ class ListApiTests(unittest.TestCase):
         )
         self.assertEqual(fresh.status, 200)
         self.assertEqual(fresh.json()["title"], "Renamed")
+
+
+class SharingTests(unittest.TestCase):
+    def setUp(self):
+        reset_database()
+        self.owner_id = create_user("owner@test.local", "Owner")
+        self.other_id = create_user("other@test.local", "Other")
+        self.third_id = create_user("third@test.local", "Third")
+
+        self.client = TestClient(main.app)
+        self.client.cookies[settings.cookie_name] = session_cookie(
+            self.owner_id, csrf="csrf-owner"
+        )
+        self.other = TestClient(main.app)
+        self.other.cookies[settings.cookie_name] = session_cookie(
+            self.other_id, csrf="csrf-other"
+        )
+        self.third = TestClient(main.app)
+        self.third.cookies[settings.cookie_name] = session_cookie(
+            self.third_id, csrf="csrf-third"
+        )
+
+    # -- helpers -------------------------------------------------------
+
+    def post(self, path, body, client=None, token="csrf-owner"):
+        client = client or self.client
+        return client.post(path, json_body=body, headers={"x-csrf-token": token})
+
+    def patch(self, path, body, client=None, token="csrf-owner"):
+        client = client or self.client
+        return client.patch(path, json_body=body, headers={"x-csrf-token": token})
+
+    def delete(self, path, client=None, token="csrf-owner"):
+        client = client or self.client
+        return client.delete(path, headers={"x-csrf-token": token})
+
+    def make_list(self, title="Chores"):
+        response = self.post("/api/lists", {"title": title})
+        self.assertEqual(response.status, 201)
+        return response.json()
+
+    def make_link(self, list_id, **overrides):
+        payload = {"role": "editor", "max_uses": 1, "expires_in_days": 7}
+        payload.update(overrides)
+        response = self.post(f"/api/lists/{list_id}/invite-links", payload)
+        self.assertEqual(response.status, 201)
+        link = response.json()
+        link["token"] = link["url"].rsplit("/join/", 1)[1]
+        return link
+
+    # -- invite links --------------------------------------------------
+
+    def test_link_grants_access_once(self):
+        created = self.make_list()
+        link = self.make_link(created["id"])
+
+        joined = self.other.get(f"/join/{link['token']}")
+        self.assertEqual(joined.status, 303)
+        self.assertEqual(joined.location, f"/#/list/{created['id']}")
+
+        listing = self.other.get("/api/lists").json()["lists"]
+        self.assertEqual([(entry["id"], entry["role"]) for entry in listing], [(created["id"], "editor")])
+
+        # A single-use link is spent.
+        again = self.third.get(f"/join/{link['token']}")
+        self.assertEqual(again.status, 410)
+
+    def test_viewer_link_is_read_only(self):
+        created = self.make_list()
+        link = self.make_link(created["id"], role="viewer")
+        self.other.get(f"/join/{link['token']}")
+
+        self.assertEqual(
+            self.other.get(f"/api/lists/{created['id']}/tasks").status, 200
+        )
+        response = self.other.post(
+            f"/api/lists/{created['id']}/tasks",
+            json_body={"title": "nope"},
+            headers={"x-csrf-token": "csrf-other"},
+        )
+        self.assertEqual(response.status, 403)
+
+    def test_revoked_link_cannot_be_used(self):
+        created = self.make_list()
+        link = self.make_link(created["id"], max_uses=5)
+        self.assertEqual(
+            self.delete(f"/api/lists/{created['id']}/invite-links/{link['id']}").status,
+            204,
+        )
+        self.assertEqual(self.other.get(f"/join/{link['token']}").status, 410)
+
+    def test_expired_link_cannot_be_used(self):
+        created = self.make_list()
+        link = self.make_link(created["id"], max_uses=5)
+        with database.connection() as conn:
+            conn.execute(
+                "UPDATE invite_tokens SET expires_at = '2000-01-01T00:00:00Z' WHERE id = ?",
+                (link["id"],),
+            )
+        self.assertEqual(self.other.get(f"/join/{link['token']}").status, 410)
+
+    def test_signed_out_visitor_is_sent_to_login(self):
+        created = self.make_list()
+        link = self.make_link(created["id"])
+        anon = TestClient(main.app)
+        response = anon.get(f"/join/{link['token']}")
+        self.assertEqual(response.status, 302)
+        self.assertTrue(response.location.startswith("/auth/login?next=/join/"))
+
+    def test_dev_login_can_resume_an_invite(self):
+        created = self.make_list()
+        link = self.make_link(created["id"])
+        anon = TestClient(main.app)
+
+        login = anon.get(
+            f"/auth/dev-login?email=new@test.local&next=/join/{link['token']}"
+        )
+        self.assertEqual(login.status, 303)
+        self.assertEqual(login.location, f"/join/{link['token']}")
+
+        joined = anon.get(f"/join/{link['token']}")
+        self.assertEqual(joined.status, 303)
+        self.assertEqual(joined.location, f"/#/list/{created['id']}")
+
+        listing = anon.get("/api/lists").json()["lists"]
+        self.assertEqual([(entry["id"], entry["role"]) for entry in listing], [(created["id"], "editor")])
+
+    def test_link_validation(self):
+        created = self.make_list()
+        for payload in (
+            {"role": "owner"},
+            {"max_uses": 0},
+            {"max_uses": 101},
+            {"expires_in_days": 0},
+            {"expires_in_days": 91},
+        ):
+            self.assertEqual(
+                self.post(f"/api/lists/{created['id']}/invite-links", payload).status,
+                422,
+            )
+
+    # -- membership ----------------------------------------------------
+
+    def test_removal_blocks_rejoining_and_unblock_restores_it(self):
+        created = self.make_list()
+        link = self.make_link(created["id"], max_uses=5)
+        self.other.get(f"/join/{link['token']}")
+
+        removed = self.delete(f"/api/lists/{created['id']}/members/{self.other_id}")
+        self.assertEqual(removed.status, 204)
+        self.assertEqual(self.other.get(f"/api/lists/{created['id']}/tasks").status, 404)
+
+        # The link is still active, but a removed person is blocked.
+        self.assertEqual(self.other.get(f"/join/{link['token']}").status, 403)
+
+        unblocked = self.delete(f"/api/lists/{created['id']}/blocks/{self.other_id}")
+        self.assertEqual(unblocked.status, 204)
+        self.assertEqual(self.other.get(f"/join/{link['token']}").status, 303)
+        self.assertEqual(
+            self.other.get(f"/api/lists/{created['id']}/tasks").status, 200
+        )
+
+    def test_role_change_takes_effect(self):
+        created = self.make_list()
+        link = self.make_link(created["id"], max_uses=5)
+        self.other.get(f"/join/{link['token']}")
+
+        response = self.patch(
+            f"/api/lists/{created['id']}/members/{self.other_id}", {"role": "viewer"}
+        )
+        self.assertEqual(response.status, 200)
+
+        blocked = self.other.post(
+            f"/api/lists/{created['id']}/tasks",
+            json_body={"title": "nope"},
+            headers={"x-csrf-token": "csrf-other"},
+        )
+        self.assertEqual(blocked.status, 403)
+
+    def test_only_the_owner_can_manage_sharing(self):
+        created = self.make_list()
+        link = self.make_link(created["id"], max_uses=5)
+        self.other.get(f"/join/{link['token']}")
+
+        self.assertEqual(
+            self.post(
+                f"/api/lists/{created['id']}/invite-links",
+                {"role": "editor"},
+                client=self.other,
+                token="csrf-other",
+            ).status,
+            403,
+        )
+        self.assertEqual(
+            self.patch(
+                f"/api/lists/{created['id']}/members/{self.owner_id}",
+                {"role": "viewer"},
+                client=self.other,
+                token="csrf-other",
+            ).status,
+            403,
+        )
+        self.assertEqual(
+            self.delete(
+                f"/api/lists/{created['id']}/members/{self.other_id}",
+                client=self.other,
+                token="csrf-other",
+            ).status,
+            403,
+        )
+
+    def test_owner_extras_only_reach_the_owner(self):
+        created = self.make_list()
+        self.make_link(created["id"])
+        link = self.make_link(created["id"], max_uses=5)
+        self.other.get(f"/join/{link['token']}")
+
+        owner_state = self.client.get(f"/api/lists/{created['id']}/state").json()
+        self.assertIn("invite_links", owner_state)
+        self.assertIn("blocks", owner_state)
+
+        member_state = self.other.get(f"/api/lists/{created['id']}/state").json()
+        self.assertNotIn("invite_links", member_state)
+        self.assertNotIn("blocks", member_state)
+
+    # -- scheduled reset -----------------------------------------------
+
+    def test_scheduled_reset_runs_exactly_once(self):
+        created = self.make_list()
+        response = self.patch(
+            f"/api/lists/{created['id']}",
+            {"reset_hour": 0, "reset_tz": "UTC"},
+        )
+        self.assertEqual(response.status, 200)
+
+        task = self.post(f"/api/lists/{created['id']}/tasks", {"title": "Milk"}).json()["task"]
+        self.patch(f"/api/tasks/{task['id']}", {"status": "completed"})
+
+        with database.connection() as conn:
+            conn.execute(
+                "UPDATE lists SET next_reset_at = '2000-01-01T00:00:00Z' WHERE id = ?",
+                (created["id"],),
+            )
+
+        state = self.client.get(f"/api/lists/{created['id']}/state").json()
+        self.assertEqual(state["tasks"][0]["status"], "pending")
+
+        with database.connection() as conn:
+            resets = conn.execute(
+                "SELECT COUNT(*) FROM activity WHERE list_id = ? AND action = 'list.auto_reset'",
+                (created["id"],),
+            ).fetchone()[0]
+            next_at = conn.execute(
+                "SELECT next_reset_at FROM lists WHERE id = ?", (created["id"],)
+            ).fetchone()[0]
+        self.assertEqual(resets, 1)
+        self.assertGreater(next_at, utcnow())
+
+        # Reading again must not reset a second time.
+        self.client.get(f"/api/lists/{created['id']}/state")
+        with database.connection() as conn:
+            resets = conn.execute(
+                "SELECT COUNT(*) FROM activity WHERE list_id = ? AND action = 'list.auto_reset'",
+                (created["id"],),
+            ).fetchone()[0]
+        self.assertEqual(resets, 1)
+
+    def test_schedule_validation(self):
+        created = self.make_list()
+        self.assertEqual(
+            self.patch(f"/api/lists/{created['id']}", {"reset_hour": 24}).status, 422
+        )
+        self.assertEqual(
+            self.patch(
+                f"/api/lists/{created['id']}", {"reset_hour": 8, "reset_tz": "not a zone!"}
+            ).status,
+            422,
+        )
+        cleared = self.patch(
+            f"/api/lists/{created['id']}", {"reset_hour": None}
+        )
+        self.assertEqual(cleared.status, 200)
+        with database.connection() as conn:
+            self.assertIsNone(
+                conn.execute(
+                    "SELECT next_reset_at FROM lists WHERE id = ?", (created["id"],)
+                ).fetchone()[0]
+            )
+
+    # -- export / import -----------------------------------------------
+
+    def test_export_and_import_round_trip(self):
+        created = self.make_list("Groceries")
+        first = self.post(f"/api/lists/{created['id']}/tasks", {"title": "Milk"}).json()["task"]
+        self.post(f"/api/lists/{created['id']}/tasks", {"title": "Bread"})
+        self.patch(f"/api/tasks/{first['id']}", {"status": "completed"})
+
+        exported = self.client.get(f"/api/lists/{created['id']}/export")
+        self.assertEqual(exported.status, 200)
+        self.assertIn("attachment", exported.headers["content-disposition"])
+        payload = exported.json()
+        self.assertEqual(payload["format"], "checklist-v2")
+        self.assertEqual([task["title"] for task in payload["tasks"]], ["Milk", "Bread"])
+
+        imported = self.client.post(
+            "/api/import",
+            json_body={"list": payload["list"], "tasks": payload["tasks"]},
+            headers={"x-csrf-token": "csrf-owner"},
+        )
+        self.assertEqual(imported.status, 201)
+        new_list = imported.json()["list"]
+        self.assertNotEqual(new_list["id"], created["id"])
+
+        tasks = self.client.get(f"/api/lists/{new_list['id']}/tasks").json()["tasks"]
+        self.assertEqual([task["title"] for task in tasks], ["Milk", "Bread"])
+        self.assertEqual(tasks[0]["status"], "completed")
+
+    def test_import_is_bounded(self):
+        response = self.client.post(
+            "/api/import",
+            json_body={
+                "list": {"title": "Too many"},
+                "tasks": [{"title": f"item {index}"} for index in range(1001)],
+            },
+            headers={"x-csrf-token": "csrf-owner"},
+        )
+        self.assertEqual(response.status, 422)
+        self.assertEqual(
+            self.client.post(
+                "/api/import",
+                json_body={"tasks": []},
+                headers={"x-csrf-token": "csrf-owner"},
+            ).status,
+            422,
+        )
 
 
 class MigrationTests(unittest.TestCase):
