@@ -1,38 +1,37 @@
-"""Standard security response headers.
+"""Security response headers, applied to every response including errors.
 
-Applied at the application so they are version controlled, testable, and not
-dependent on edge configuration. Set the same headers in a Cloudflare Transform
-Rule as well, since these only cover responses the application actually
-produced; a 502 or 521 from a proxy in front of a stopped app would not carry
-them.
+These live in the application rather than in proxy configuration so they are
+version controlled and testable. A proxy in front still needs its own copy:
+this only covers responses the app actually produced, not a 502 from a dead
+origin.
 """
-import secrets
 
-from starlette.middleware.base import BaseHTTPMiddleware
+from __future__ import annotations
 
-# Deliberately no Tailwind or Alpine CDN origins: both are served from here, so
-# there is no third-party script origin to allow.
+from config import settings
+from web import Request, Response
+
+# With no inline scripts and no eval-based template engine, the policy needs no
+# nonce and no unsafe-* escape hatch. Everything the page loads is same-origin.
 #
-# 'unsafe-eval' is required and is the policy's real limitation. Alpine compiles
-# expressions such as `editing = !editing` with `new Function`, and there is no
-# way to run the standard build without it. It allows eval in scripts that are
-# already permitted to run, so it is not itself an entry point, but it does mean
-# this policy cannot stop a script-injection bug from executing code. Closing it
-# needs Alpine's CSP build (@alpinejs/csp), which restricts expressions to
-# named lookups and would mean rewriting every binding in the template.
-CSP_TEMPLATE = "; ".join(
+# require-trusted-types-for is Chrome-only and simply ignored elsewhere. It is
+# safe here because the frontend never assigns strings to innerHTML: rows are
+# cloned from <template> and filled with textContent.
+CSP = "; ".join(
     [
         "default-src 'self'",
-        "script-src 'self' 'nonce-{nonce}' 'unsafe-eval'",
-        # Alpine writes inline styles for x-show and x-transition.
-        "style-src 'self' 'unsafe-inline'",
+        "script-src 'self'",
+        "style-src 'self'",
         "img-src 'self' data:",
         "font-src 'self'",
         "connect-src 'self'",
+        "manifest-src 'self'",
+        "worker-src 'self'",
         "object-src 'none'",
         "base-uri 'none'",
         "form-action 'self'",
         "frame-ancestors 'none'",
+        "require-trusted-types-for 'script'",
     ]
 )
 
@@ -41,46 +40,28 @@ HEADERS = {
     "X-Frame-Options": "DENY",
     "Referrer-Policy": "strict-origin-when-cross-origin",
     "X-DNS-Prefetch-Control": "off",
+    "Cross-Origin-Opener-Policy": "same-origin",
+    "Cross-Origin-Resource-Policy": "same-origin",
+    "Permissions-Policy": "camera=(), microphone=(), geolocation=(), payment=(), usb=()",
 }
 
 
-class SecurityHeadersMiddleware(BaseHTTPMiddleware):
-    def __init__(self, app, hsts_enabled, csp_enabled=True):
-        super().__init__(app)
-        # HSTS tells the browser to refuse plaintext for this host from now on.
-        # Emitting it over plain HTTP would make a local or http-only deployment
-        # unreachable, so it is tied to the secure-cookie setting, which is the
-        # flag that means "this is an HTTPS deployment".
-        self.hsts_enabled = hsts_enabled
-        self.csp_enabled = csp_enabled
+def apply(request: Request, response: Response) -> Response:
+    for name, value in HEADERS.items():
+        response.headers.setdefault(name, value)
 
-    async def dispatch(self, request, call_next):
-        # A fresh nonce per response. Generated here so that every response gets
-        # a matching header, and read back by the index route to stamp onto the
-        # inline scripts.
-        nonce = secrets.token_urlsafe(16)
-        request.state.csp_nonce = nonce
+    if settings.session_cookie_secure:
+        # Tied to the secure-cookie flag: emitting HSTS over plain HTTP would
+        # make a local or http-only deployment unreachable.
+        response.headers.setdefault(
+            "Strict-Transport-Security", "max-age=31536000; includeSubDomains"
+        )
 
-        response = await call_next(request)
+    if settings.csp_enabled:
+        response.headers.setdefault("Content-Security-Policy", CSP)
 
-        for name, value in HEADERS.items():
-            response.headers.setdefault(name, value)
-        if self.hsts_enabled:
-            response.headers.setdefault(
-                "Strict-Transport-Security",
-                "max-age=31536000; includeSubDomains",
-            )
-        if self.csp_enabled:
-            response.headers.setdefault(
-                "Content-Security-Policy",
-                CSP_TEMPLATE.format(nonce=nonce),
-            )
-        return response
+    # Per-user JSON must not sit in a browser or intermediary cache.
+    if request.path.startswith("/api/"):
+        response.headers.setdefault("Cache-Control", "no-store")
 
-
-def install(app, hsts_enabled, csp_enabled=True):
-    app.add_middleware(
-        SecurityHeadersMiddleware,
-        hsts_enabled=hsts_enabled,
-        csp_enabled=csp_enabled,
-    )
+    return response

@@ -1,0 +1,270 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Collaborative Checklists</title>
+  <meta name="description" content="Shared checklists for the household.">
+  <meta name="theme-color" content="#f8fafc" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#0f172a" media="(prefers-color-scheme: dark)">
+  <link rel="manifest" href="/manifest.json">
+  <link rel="icon" type="image/png" sizes="192x192" href="/static/icon-192.png">
+  <link rel="apple-touch-icon" href="/static/icon-192.png">
+  <link rel="stylesheet" href="/static/app.css?v=__ASSET_CSS__">
+  <script src="/static/app.js?v=__ASSET_JS__" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+
+  <header class="topbar">
+    <button class="brand" id="brand" type="button">Checklists</button>
+    <div class="topbar-actions">
+      <button class="icon-button" id="theme-toggle" type="button" aria-label="Switch colour theme">
+        <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+          <circle cx="12" cy="12" r="9"></circle>
+          <path class="icon-half" d="M12 3a9 9 0 0 0 0 18z"></path>
+        </svg>
+      </button>
+      <div class="auth-slot" id="auth-slot"></div>
+    </div>
+  </header>
+
+  <p class="offline-banner" id="offline-banner" role="status" hidden>
+    Offline — checklists cannot be loaded or changed until the connection is back.
+  </p>
+
+  <main class="page" id="main" tabindex="-1">
+    <p class="loading">Loading…</p>
+  </main>
+
+  <div class="toasts" id="toasts" role="status" aria-live="polite"></div>
+
+  <dialog class="dialog" id="dlg-new-list">
+    <form class="dialog-body" id="form-new-list">
+      <h2>New checklist</h2>
+      <label class="field">
+        <span>Title</span>
+        <input name="title" maxlength="200" required autocomplete="off" placeholder="e.g. Daily chores">
+      </label>
+      <label class="check">
+        <input type="checkbox" name="resettable">
+        <span>Show a Reset button — useful for daily tasks</span>
+      </label>
+      <div class="dialog-actions">
+        <button type="button" class="button" data-action="close-dialog">Cancel</button>
+        <button type="submit" class="button button-primary">Create</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog class="dialog" id="dlg-confirm">
+    <div class="dialog-body">
+      <h2 data-field="title"></h2>
+      <p class="muted" data-field="message"></p>
+      <div class="dialog-actions">
+        <button type="button" class="button" data-action="close-dialog">Cancel</button>
+        <button type="button" class="button button-danger" data-action="confirm"></button>
+      </div>
+    </div>
+  </dialog>
+
+  <dialog class="dialog dialog-wide" id="dlg-share">
+    <div class="dialog-body">
+      <h2>Share “<span data-field="title"></span>”</h2>
+
+      <section class="share-section">
+        <h3>People</h3>
+        <ul class="member-list" data-slot="members"></ul>
+      </section>
+
+      <section class="share-section" data-slot="blocked-section" hidden>
+        <h3>Removed</h3>
+        <ul class="member-list" data-slot="blocked"></ul>
+      </section>
+
+      <section class="share-section">
+        <h3>Invite link</h3>
+        <form class="invite-form" id="form-invite">
+          <label class="field-inline">
+            <span>Role</span>
+            <select name="role">
+              <option value="editor">Can edit</option>
+              <option value="viewer">Can view</option>
+            </select>
+          </label>
+          <label class="field-inline">
+            <span>Expires</span>
+            <select name="expires_in_days">
+              <option value="1">1 day</option>
+              <option value="7" selected>7 days</option>
+              <option value="30">30 days</option>
+            </select>
+          </label>
+          <label class="field-inline">
+            <span>Uses</span>
+            <input type="number" name="max_uses" min="1" max="100" value="1">
+          </label>
+          <button type="submit" class="button button-primary">Create link</button>
+        </form>
+
+        <div class="invite-result" data-slot="new-link" hidden>
+          <label class="field">
+            <span>Copy this link</span>
+            <input type="text" readonly data-field="url">
+          </label>
+          <button type="button" class="button" data-action="copy-link">Copy</button>
+        </div>
+
+        <ul class="link-list" data-slot="links"></ul>
+      </section>
+
+      <div class="dialog-actions">
+        <button type="button" class="button" data-action="close-dialog">Done</button>
+      </div>
+    </div>
+  </dialog>
+
+  <dialog class="dialog" id="dlg-settings">
+    <form class="dialog-body" id="form-settings">
+      <h2>List settings</h2>
+      <label class="field">
+        <span>Title</span>
+        <input name="title" maxlength="200" required autocomplete="off">
+      </label>
+      <label class="check">
+        <input type="checkbox" name="is_resettable">
+        <span>Show a Reset button</span>
+      </label>
+      <label class="check">
+        <input type="checkbox" name="auto_reset">
+        <span>Reset automatically every day</span>
+      </label>
+      <label class="field" data-slot="reset-time" hidden>
+        <span>Reset at</span>
+        <input type="time" name="reset_time" value="04:00">
+      </label>
+      <div class="dialog-actions">
+        <a class="button" data-slot="export" href="#">Export JSON</a>
+        <span class="dialog-spacer"></span>
+        <button type="button" class="button" data-action="close-dialog">Cancel</button>
+        <button type="submit" class="button button-primary">Save</button>
+      </div>
+    </form>
+  </dialog>
+
+  <input type="file" id="import-file" accept="application/json,.json" hidden>
+
+  <template id="tpl-signed-out">
+    <a class="button button-primary" href="/auth/login">Sign in</a>
+  </template>
+
+  <template id="tpl-signed-in">
+    <span class="user-name" data-field="name"></span>
+    <form method="post" action="/auth/logout" class="logout-form">
+      <input type="hidden" name="csrf_token" data-field="csrf">
+      <button type="submit" class="link-button">Log out</button>
+    </form>
+  </template>
+
+  <template id="tpl-welcome">
+    <section class="welcome">
+      <h1>Collaborative Checklists</h1>
+      <p>Create, share, and tick off lists with the people you live with.</p>
+      <a class="button button-primary" href="/auth/login">Sign in with Google</a>
+    </section>
+  </template>
+
+  <template id="tpl-overview">
+    <section class="overview">
+      <div class="section-head">
+        <h1 class="section-title">Your checklists</h1>
+        <div class="section-actions">
+          <button type="button" class="button button-ghost" data-action="import">Import</button>
+          <button type="button" class="button button-primary" data-action="new-list">New list</button>
+        </div>
+      </div>
+      <div class="list-grid" data-slot="lists"></div>
+      <div class="empty-state" data-slot="empty" hidden>
+        <p>No checklists yet.</p>
+        <p class="muted">Create one to get started.</p>
+      </div>
+    </section>
+  </template>
+
+  <template id="tpl-list-card">
+    <article class="list-card">
+      <button type="button" class="list-card-button" data-action="open-list">
+        <span class="list-card-top">
+          <span class="list-card-title" data-field="title"></span>
+          <span class="badge" data-field="badge" hidden>Reset</span>
+        </span>
+        <span class="list-card-meta" data-field="meta"></span>
+        <span class="list-card-count" data-field="count"></span>
+      </button>
+    </article>
+  </template>
+
+  <template id="tpl-workspace">
+    <section class="workspace">
+      <div class="workspace-head">
+        <div class="workspace-heading">
+          <h1 data-field="title"></h1>
+          <p class="muted" data-field="sub"></p>
+        </div>
+        <div class="workspace-actions">
+          <button type="button" class="button button-ghost" data-action="toggle-edit" aria-pressed="false">Edit</button>
+          <button type="button" class="button button-ghost" data-action="share" hidden>Share</button>
+          <button type="button" class="button button-ghost" data-action="settings" hidden>Settings</button>
+          <button type="button" class="button button-warn" data-action="reset" hidden>Reset</button>
+          <button type="button" class="link-button danger" data-action="delete-list" hidden>Delete</button>
+        </div>
+      </div>
+
+      <p class="presence" data-slot="presence" hidden></p>
+
+      <p class="hint" data-slot="edit-hint" hidden>
+        Reordering and delete controls are visible while editing.
+      </p>
+
+      <form class="add-form" data-action="add-task">
+        <label class="visually-hidden" for="new-task">New item</label>
+        <input id="new-task" name="title" placeholder="Add an item…" autocomplete="off" maxlength="500" required>
+        <button type="submit" class="button button-primary">Add</button>
+      </form>
+
+      <form class="filter-form" data-action="filter" hidden>
+        <label class="visually-hidden" for="task-filter">Filter items</label>
+        <input id="task-filter" type="search" placeholder="Filter items…" autocomplete="off">
+      </form>
+
+      <ul class="tasks" data-slot="pending"></ul>
+      <p class="empty" data-slot="no-pending" hidden>Nothing left. Add an item above.</p>
+
+      <section class="completed" data-slot="completed" hidden>
+        <h2 class="completed-title">Completed</h2>
+        <ul class="tasks tasks-done" data-slot="completed-list"></ul>
+      </section>
+
+      <details class="activity" data-slot="activity" hidden>
+        <summary>Recent activity</summary>
+        <ul class="activity-list" data-slot="activity-list"></ul>
+      </details>
+    </section>
+  </template>
+
+  <template id="tpl-task">
+    <li class="task">
+      <label class="task-label">
+        <input type="checkbox" class="task-check">
+        <span class="task-title" data-field="title"></span>
+      </label>
+      <span class="task-meta" data-field="meta"></span>
+      <div class="task-actions">
+        <button type="button" class="icon-small" data-action="move-up" aria-label="Move up">↑</button>
+        <button type="button" class="icon-small" data-action="move-down" aria-label="Move down">↓</button>
+        <button type="button" class="icon-small danger" data-action="delete-task" aria-label="Delete item">×</button>
+      </div>
+    </li>
+  </template>
+</body>
+</html>

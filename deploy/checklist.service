@@ -1,0 +1,28 @@
+[Unit]
+Description=Collaborative Checklists
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=checklist
+WorkingDirectory=/opt/checklist
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/opt/checklist/.venv/bin/uvicorn main:app --host 127.0.0.1 --port 8000 --proxy-headers
+Restart=always
+RestartSec=2
+
+# The checkout is read-only to the service. The database lives in
+# /var/lib/checklist (set DATABASE_PATH accordingly) because ProtectSystem
+# would otherwise refuse the write.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/checklist
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=multi-user.target
