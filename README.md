@@ -1,5 +1,11 @@
 # Collaborative Checklist PWA
 
+> **This branch (`v2`) is a rebuild.** It removes every third-party runtime
+> dependency except `uvicorn`, and adds live sync for shared lists, invite
+> links, roles, and offline writes. The documentation below still describes the
+> current `main` deployment and will be rewritten when the port is complete.
+> See `PLAN.md` for the design.
+
 A self-hosted, mobile-friendly collaborative checklist web application built with FastAPI, SQLite, Tailwind CSS, and Alpine.js, featuring PWA support.
 
 ## Features

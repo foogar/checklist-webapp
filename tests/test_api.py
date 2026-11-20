@@ -1,309 +1,388 @@
-"""End-to-end tests for authentication, access control, and validation.
+"""End-to-end tests for the shell, sessions, headers, and migrations.
 
-Runs standalone, no pytest required:
+Stdlib only, no pytest:
 
-    .\\.venv\\Scripts\\python.exe tests\\test_api.py
+    python tests/test_api.py
+    python -m unittest discover -s tests -v
 
-Exits non-zero if any check fails. Covers the endpoints that mutate data, since
-those are the ones where an authorization mistake is actually exploitable.
+The suite runs against a temporary database and never touches a real one.
 """
 
-import base64
-import json
+from __future__ import annotations
+
+import atexit
 import os
 import shutil
+import sqlite3
 import sys
 import tempfile
+import time
+import unittest
+from contextlib import contextmanager
+from pathlib import Path
 
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+TESTS_DIR = Path(__file__).resolve().parent
+ROOT = TESTS_DIR.parent
+
+WORKDIR = tempfile.mkdtemp(prefix="checklist-test-")
+atexit.register(shutil.rmtree, WORKDIR, ignore_errors=True)
+
+# Set before importing the app: config reads the environment once, at import.
+os.environ["DATABASE_PATH"] = str(Path(WORKDIR) / "test.db")
+os.environ.setdefault("SESSION_SECRET", "z" * 48)
+os.environ["DEV_AUTH_ENABLED"] = "1"
+os.environ["RATE_LIMIT_ENABLED"] = "0"  # integration tests stay deterministic
+
+sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(TESTS_DIR))
+
+import auth  # noqa: E402
+import database  # noqa: E402
+import main  # noqa: E402
+import ratelimit  # noqa: E402
+from config import settings  # noqa: E402
+from asgi_client import TestClient  # noqa: E402
+
+TABLES = (
+    "activity",
+    "idempotency",
+    "list_blocks",
+    "invite_tokens",
+    "list_shares",
+    "list_invites",
+    "tasks",
+    "lists",
+    "users",
+)
 
 
-def main() -> int:
-    # Point the database at a temporary file via the documented override, so the
-    # suite never touches the real checklist.db. No working-directory juggling
-    # is needed: every path in the app is anchored to the project directory.
-    workdir = tempfile.mkdtemp(prefix="checklist-test-")
-    os.environ["DATABASE_PATH"] = os.path.join(workdir, "test.db")
-    os.environ.setdefault("SESSION_SECRET", "z" * 48)
-    sys.path.insert(0, PROJECT_ROOT)
+@contextmanager
+def override(**values):
+    """Temporarily change a frozen setting for one test.
 
-    import itsdangerous
-    from starlette.testclient import TestClient
+    Every module holds the same Settings instance, so patching the object
+    affects all of them.
+    """
+    previous = {key: getattr(settings, key) for key in values}
+    for key, value in values.items():
+        object.__setattr__(settings, key, value)
+    try:
+        yield
+    finally:
+        for key, value in previous.items():
+            object.__setattr__(settings, key, value)
 
-    import main
-    from database import connect
 
-    secret = os.environ["SESSION_SECRET"]
+def reset_database() -> None:
+    database.init_db()
+    with database.connection() as conn:
+        for table in TABLES:
+            conn.execute(f"DELETE FROM {table}")
 
-    def make_cookie(user_id, email, name):
-        payload = base64.b64encode(
-            json.dumps({"user": {"id": user_id, "email": email, "name": name}}).encode()
+
+def create_user(email: str = "owner@test.local", name: str = "Owner") -> int:
+    with database.connection() as conn:
+        return auth.upsert_user(conn, email, name, None)
+
+
+def session_cookie(user_id: int, csrf: str = "test-csrf", ttl: int = 3600) -> str:
+    now = int(time.time())
+    return auth.sign_json(
+        {"uid": user_id, "csrf": csrf, "iat": now, "exp": now + ttl}
+    )
+
+
+class ShellTests(unittest.TestCase):
+    def setUp(self):
+        reset_database()
+        self.client = TestClient(main.app)
+
+    def test_health_reports_database(self):
+        response = self.client.get("/health")
+        self.assertEqual(response.status, 200)
+        self.assertEqual(response.json()["status"], "ok")
+        self.assertEqual(response.json()["database"], "ok")
+
+    def test_shell_is_static_and_contains_no_user_data(self):
+        response = self.client.get("/")
+        self.assertEqual(response.status, 200)
+        self.assertIn("text/html", response.headers["content-type"])
+        self.assertIn("Collaborative Checklists", response.text)
+        self.assertNotIn("@test.local", response.text)
+        self.assertNotIn("<script>", response.text)
+
+    def test_shell_versions_its_assets(self):
+        body = self.client.get("/").text
+        self.assertNotIn("__ASSET_", body)
+        self.assertRegex(body, r"/static/app\.css\?v=[0-9a-f]+")
+        self.assertRegex(body, r"/static/app\.js\?v=[0-9a-f]+")
+
+    def test_manifest_is_installable(self):
+        response = self.client.get("/manifest.json")
+        self.assertEqual(response.status, 200)
+        manifest = response.json()
+        self.assertEqual(manifest["start_url"], "/")
+        self.assertEqual(manifest["display"], "standalone")
+        sizes = {icon["sizes"] for icon in manifest["icons"]}
+        self.assertEqual(sizes, {"192x192", "512x512"})
+
+    def test_service_worker_is_served_from_root(self):
+        response = self.client.get("/sw.js")
+        self.assertEqual(response.status, 200)
+        self.assertEqual(response.headers["service-worker-allowed"], "/")
+        self.assertEqual(response.headers["cache-control"], "no-cache")
+        self.assertIn("text/javascript", response.headers["content-type"])
+
+    def test_offline_page_is_served(self):
+        response = self.client.get("/offline.html")
+        self.assertEqual(response.status, 200)
+        self.assertIn("You are offline", response.text)
+
+    def test_head_returns_headers_without_a_body(self):
+        response = self.client.head("/")
+        self.assertEqual(response.status, 200)
+        self.assertEqual(response.body, b"")
+        self.assertGreater(int(response.headers["content-length"]), 0)
+
+    def test_static_path_traversal_is_refused(self):
+        self.assertEqual(self.client.get("/static/../main.py").status, 404)
+        self.assertEqual(self.client.get("/static/%2e%2e/main.py").status, 404)
+
+    def test_unknown_page_is_html(self):
+        response = self.client.get("/nope")
+        self.assertEqual(response.status, 404)
+        self.assertIn("text/html", response.headers["content-type"])
+
+    def test_unknown_api_is_json(self):
+        response = self.client.get("/api/nope")
+        self.assertEqual(response.status, 404)
+        self.assertEqual(response.json()["detail"], "Not found")
+
+    def test_robots_disallows_indexing(self):
+        response = self.client.get("/robots.txt")
+        self.assertEqual(response.status, 200)
+        self.assertIn("Disallow: /", response.text)
+
+    def test_error_detail_is_escaped_in_html(self):
+        request = main.Request(
+            method="GET",
+            path="/auth/callback",
+            query={},
+            headers={},
+            cookies={},
+            body=b"",
+            client_host="127.0.0.1",
+            scheme="http",
         )
-        return itsdangerous.TimestampSigner(secret).sign(payload).decode()
+        response = main.error_response(request, main.HTTPError(400, "<script>alert(1)</script>"))
+        self.assertNotIn(b"<script>alert", response.body)
+        self.assertIn(b"&lt;script&gt;", response.body)
 
-    conn = connect()
-    conn.execute("INSERT INTO users (email,name) VALUES ('owner@test.local','Owner')")
-    conn.execute("INSERT INTO users (email,name) VALUES ('stranger@test.local','Stranger')")
-    conn.commit()
-    conn.close()
 
-    owner = TestClient(main.app)
-    stranger = TestClient(main.app)
-    owner.cookies.set("session", make_cookie(1, "owner@test.local", "Owner"))
-    stranger.cookies.set("session", make_cookie(2, "stranger@test.local", "Stranger"))
+class HeaderTests(unittest.TestCase):
+    def setUp(self):
+        reset_database()
+        self.client = TestClient(main.app)
 
-    results = []
+    def test_security_headers_on_success_and_error(self):
+        for path in ("/", "/nope", "/api/me"):
+            response = self.client.get(path)
+            self.assertEqual(response.headers["x-content-type-options"], "nosniff")
+            self.assertEqual(response.headers["x-frame-options"], "DENY")
+            self.assertEqual(
+                response.headers["referrer-policy"], "strict-origin-when-cross-origin"
+            )
+            self.assertIn("content-security-policy", response.headers)
 
-    def check(label, got, want):
-        ok = got == want
-        results.append(ok)
-        print(f"  [{'PASS' if ok else 'FAIL'}] {label}: got {got}, want {want}")
+    def test_csp_has_no_unsafe_escape_hatches(self):
+        policy = self.client.get("/").headers["content-security-policy"]
+        self.assertNotIn("unsafe-inline", policy)
+        self.assertNotIn("unsafe-eval", policy)
+        self.assertNotIn("nonce-", policy)
+        self.assertIn("script-src 'self'", policy)
 
-    print("== unauthenticated requests are rejected ==")
-    anon = TestClient(main.app)
-    check("GET /api/lists", anon.get("/api/lists").status_code, 401)
-    check("POST /api/lists", anon.post("/api/lists", json={"title": "x"}).status_code, 401)
-    check("DELETE /api/lists/1", anon.delete("/api/lists/1").status_code, 401)
+    def test_api_responses_are_not_cacheable(self):
+        response = self.client.get("/api/me")
+        self.assertEqual(response.headers["cache-control"], "no-store")
 
-    print("== owner creates a list and a task ==")
-    resp = owner.post("/api/lists", json={"title": "Groceries", "is_resettable": True})
-    check("create list", resp.status_code, 200)
-    list_id = resp.json()["id"]
+    def test_shell_must_be_revalidated(self):
+        self.assertEqual(self.client.get("/").headers["cache-control"], "no-cache")
 
-    resp = owner.post(f"/api/lists/{list_id}/tasks", json={"title": "Milk"})
-    check("create task", resp.status_code, 200)
-    task_id = resp.json()["id"]
+    def test_hsts_only_when_cookies_are_secure(self):
+        self.assertNotIn("strict-transport-security", self.client.get("/").headers)
+        with override(session_cookie_secure=True):
+            self.assertIn("strict-transport-security", self.client.get("/").headers)
 
-    print("== owner has access ==")
-    check("GET tasks", owner.get(f"/api/lists/{list_id}/tasks").status_code, 200)
-    check("GET lists", owner.get("/api/lists").status_code, 200)
 
-    print("== a user with no share is denied everywhere ==")
-    check("GET tasks", stranger.get(f"/api/lists/{list_id}/tasks").status_code, 403)
-    check("POST task", stranger.post(f"/api/lists/{list_id}/tasks", json={"title": "x"}).status_code, 403)
-    check("PATCH task", stranger.patch(f"/api/tasks/{task_id}", json={"status": "completed"}).status_code, 403)
-    check("DELETE task", stranger.delete(f"/api/tasks/{task_id}").status_code, 403)
-    check("DELETE list", stranger.delete(f"/api/lists/{list_id}").status_code, 404)
-    check("RESET list", stranger.post(f"/api/lists/{list_id}/reset").status_code, 403)
-    check(
-        "SHARE list",
-        stranger.post(f"/api/lists/{list_id}/share", json={"email": "stranger@test.local"}).status_code,
-        403,
-    )
+class SessionTests(unittest.TestCase):
+    def setUp(self):
+        reset_database()
+        self.client = TestClient(main.app)
 
-    print("== development login is inert unless explicitly enabled ==")
-    check(
-        "/auth/dev-login is 404 when DEV_AUTH_ENABLED is off",
-        owner.get("/auth/dev-login").status_code,
-        404,
-    )
+    def test_anonymous_me(self):
+        response = self.client.get("/api/me")
+        self.assertEqual(response.status, 200)
+        self.assertIsNone(response.json()["user"])
+        self.assertEqual(response.json()["csrf"], "")
 
-    print("== sharing and revoking ==")
-    check(
-        "owner shares with the stranger",
-        owner.post(f"/api/lists/{list_id}/share", json={"email": "stranger@test.local"}).status_code,
-        200,
-    )
-    shares = owner.get(f"/api/lists/{list_id}/shares")
-    check("owner can list shares", shares.status_code, 200)
-    check("one share present", len(shares.json()), 1)
+    def test_forged_cookie_is_accepted(self):
+        user_id = create_user("owner@test.local", "Owner")
+        self.client.cookies[settings.cookie_name] = session_cookie(user_id)
+        data = self.client.get("/api/me").json()
+        self.assertEqual(data["user"]["email"], "owner@test.local")
+        self.assertEqual(data["user"]["name"], "Owner")
+        self.assertEqual(data["csrf"], "test-csrf")
 
-    check("stranger can now read tasks", stranger.get(f"/api/lists/{list_id}/tasks").status_code, 200)
-    check(
-        "stranger cannot see the share list",
-        stranger.get(f"/api/lists/{list_id}/shares").status_code,
-        404,
-    )
+    def test_tampered_cookie_is_ignored(self):
+        user_id = create_user()
+        cookie = session_cookie(user_id)
+        self.client.cookies[settings.cookie_name] = cookie[:-2] + "aa"
+        self.assertIsNone(self.client.get("/api/me").json()["user"])
 
-    check(
-        "owner cannot share with themselves",
-        owner.post(f"/api/lists/{list_id}/share", json={"email": "owner@test.local"}).status_code,
-        400,
-    )
+    def test_expired_cookie_is_ignored(self):
+        user_id = create_user()
+        self.client.cookies[settings.cookie_name] = session_cookie(user_id, ttl=-10)
+        self.assertIsNone(self.client.get("/api/me").json()["user"])
 
-    check(
-        "re-sharing is idempotent",
-        owner.post(f"/api/lists/{list_id}/share", json={"email": "stranger@test.local"}).json().get(
-            "already"
-        ),
-        True,
-    )
+    def test_deleted_user_is_signed_out(self):
+        user_id = create_user()
+        self.client.cookies[settings.cookie_name] = session_cookie(user_id)
+        with database.connection() as conn:
+            conn.execute("DELETE FROM users WHERE id = ?", (user_id,))
+        self.assertIsNone(self.client.get("/api/me").json()["user"])
 
-    sharee_id = shares.json()[0]["user_id"]
-    check(
-        "stranger cannot revoke their own access",
-        stranger.request("DELETE", f"/api/lists/{list_id}/shares", json={"email": "stranger@test.local"}).status_code,
-        404,
-    )
+    def test_logout_requires_csrf(self):
+        user_id = create_user()
+        self.client.cookies[settings.cookie_name] = session_cookie(user_id)
+        response = self.client.post("/auth/logout", data={})
+        self.assertEqual(response.status, 403)
 
-    check(
-        "owner revokes the share",
-        owner.request(
-            "DELETE", f"/api/lists/{list_id}/shares", json={"email": "stranger@test.local"}
-        ).status_code,
-        200,
-    )
-    check("share list is now empty", len(owner.get(f"/api/lists/{list_id}/shares").json()), 0)
-    check(
-        "stranger has lost access",
-        stranger.get(f"/api/lists/{list_id}/tasks").status_code,
-        403,
-    )
-    check(
-        "revoking twice reports not found",
-        owner.request(
-            "DELETE", f"/api/lists/{list_id}/shares", json={"email": "stranger@test.local"}
-        ).status_code,
-        404,
-    )
+    def test_logout_clears_the_session(self):
+        user_id = create_user()
+        self.client.cookies[settings.cookie_name] = session_cookie(user_id, csrf="abc123")
+        response = self.client.post("/auth/logout", data={"csrf_token": "abc123"})
+        self.assertEqual(response.status, 303)
+        self.assertNotIn(settings.cookie_name, self.client.cookies)
+        self.assertIsNone(self.client.get("/api/me").json()["user"])
 
-    print("== email enumeration is closed ==")
-    registered = owner.post(f"/api/lists/{list_id}/share", json={"email": "stranger@test.local"})
-    unregistered = owner.post(f"/api/lists/{list_id}/share", json={"email": "never-seen@test.local"})
-    check("registered and unregistered both return 200",
-          (registered.status_code, unregistered.status_code), (200, 200))
-    check("both responses carry the same keys",
-          sorted(registered.json()), sorted(unregistered.json()))
-    check("only the status value differs",
-          (registered.json()["status"], unregistered.json()["status"]), ("shared", "invited"))
+    def test_cross_origin_logout_is_refused(self):
+        user_id = create_user()
+        self.client.cookies[settings.cookie_name] = session_cookie(user_id, csrf="abc123")
+        response = self.client.post(
+            "/auth/logout",
+            data={"csrf_token": "abc123"},
+            headers={"origin": "https://evil.example"},
+        )
+        self.assertEqual(response.status, 403)
 
-    print("== revocation while the sharee already has the list open ==")
-    open_tasks = stranger.get(f"/api/lists/{list_id}/tasks")
-    check("sharee loads tasks before revocation", open_tasks.status_code, 200)
-    check("sharee sees the task title", open_tasks.json()[0]["title"], "Milk")
+    def test_same_origin_logout_is_allowed(self):
+        user_id = create_user()
+        self.client.cookies[settings.cookie_name] = session_cookie(user_id, csrf="abc123")
+        response = self.client.post(
+            "/auth/logout",
+            data={"csrf_token": "abc123"},
+            headers={"origin": "http://testserver"},
+        )
+        self.assertEqual(response.status, 303)
 
-    owner.request("DELETE", f"/api/lists/{list_id}/shares", json={"email": "stranger@test.local"})
+    def test_dev_login_is_404_when_disabled(self):
+        with override(dev_auth_enabled=False):
+            self.assertEqual(self.client.get("/auth/dev-login").status, 404)
 
-    # Access is re-evaluated per request, so every fresh call is denied.
-    check("sharee cannot re-read the list", stranger.get(f"/api/lists/{list_id}/tasks").status_code, 403)
-    check("sharee cannot add a task",
-          stranger.post(f"/api/lists/{list_id}/tasks", json={"title": "sneaky"}).status_code, 403)
-    check("sharee cannot reorder",
-          stranger.post(f"/api/lists/{list_id}/reorder", json={"task_ids": [task_id]}).status_code, 403)
-    check("sharee cannot reset",
-          stranger.post(f"/api/lists/{list_id}/reset").status_code, 403)
-    check("the list is gone from the sharee's list view",
-          any(x["id"] == list_id for x in stranger.get("/api/lists").json()), False)
+    def test_dev_login_creates_a_session(self):
+        response = self.client.get("/auth/dev-login?email=Dev@Example.com")
+        self.assertEqual(response.status, 303)
+        self.assertEqual(response.location, "/")
+        self.assertEqual(self.client.get("/api/me").json()["user"]["email"], "dev@example.com")
 
-    print("== pending invites ==")
-    owner.post(f"/api/lists/{list_id}/share", json={"email": "never-seen@test.local"})
-    entries = owner.get(f"/api/lists/{list_id}/shares").json()
-    pending = [e for e in entries if e["status"] == "pending"]
-    check("the unseen address is listed as pending", len(pending), 1)
-    check("pending entry carries the email", pending[0]["email"], "never-seen@test.local")
-    check("confirmed entries are listed first",
-          [e["status"] for e in entries].index("pending") == len(entries) - 1, True)
 
-    # First sign-in for that address claims the invite, same path login uses.
-    main.upsert_user("never-seen@test.local", "Newcomer")
-    after = owner.get(f"/api/lists/{list_id}/shares").json()
-    check("the invite became a confirmed share on signup",
-          any(e["status"] == "confirmed" and e["email"] == "never-seen@test.local" for e in after), True)
-    check("no pending entries remain", [e for e in after if e["status"] == "pending"], [])
-    db = main.connect()
-    check("the invite table was emptied",
-          db.execute("SELECT COUNT(*) FROM list_invites").fetchone()[0], 0)
-    check("the share landed in list_shares",
-          db.execute("""
-              SELECT COUNT(*) FROM list_shares ls JOIN users u ON u.id = ls.user_id
-              WHERE u.email = 'never-seen@test.local'
-          """).fetchone()[0], 1)
-    db.close()
+class LimitTests(unittest.TestCase):
+    def setUp(self):
+        reset_database()
+        self.client = TestClient(main.app)
 
-    print("== a revoked invite is never granted ==")
-    owner.post(f"/api/lists/{list_id}/share", json={"email": "future@test.local"})
-    check("it shows as pending",
-          any(e["status"] == "pending" and e["email"] == "future@test.local"
-              for e in owner.get(f"/api/lists/{list_id}/shares").json()), True)
-    check("owner revokes the invite",
-          owner.request("DELETE", f"/api/lists/{list_id}/shares", json={"email": "future@test.local"}).status_code,
-          200)
-    main.upsert_user("future@test.local", "Future")
-    check("signing up does not resurrect it",
-          any(e["email"] == "future@test.local"
-              for e in owner.get(f"/api/lists/{list_id}/shares").json()), False)
+    def test_oversized_body_is_rejected(self):
+        response = self.client.post("/auth/logout", body=b"x" * (70 * 1024))
+        self.assertEqual(response.status, 413)
 
-    print("== invites are case-insensitive ==")
-    mixed = owner.post(f"/api/lists/{list_id}/share", json={"email": "MixedCase@Test.LOCAL"})
-    main.upsert_user("mixedcase@test.local", "Mixed")
-    check("an address invited in mixed case still matches on signup",
-          any(e["email"] == "mixedcase@test.local" and e["status"] == "confirmed"
-              for e in owner.get(f"/api/lists/{list_id}/shares").json()), True)
+    def test_limiter_allows_then_refuses_then_recovers(self):
+        limiter = ratelimit.SlidingWindowLimiter()
+        self.assertEqual(limiter.check("general", "k", 2, 60), (True, 0))
+        self.assertEqual(limiter.check("general", "k", 2, 60), (True, 0))
+        allowed, retry_after = limiter.check("general", "k", 2, 60)
+        self.assertFalse(allowed)
+        self.assertGreaterEqual(retry_after, 1)
 
-    print("== emails differing only by case are the same account ==")
-    legacy = main.connect()
-    legacy.execute("INSERT INTO users (email,name) VALUES ('MixedCase@Legacy.Local','Legacy')")
-    legacy.commit()
-    legacy_id = legacy.execute(
-        "SELECT id FROM users WHERE LOWER(email) = ?", ("mixedcase@legacy.local",)
-    ).fetchone()[0]
-    legacy.close()
-    check("signing in with different case reuses the existing account",
-          main.upsert_user("MIXEDCASE@legacy.local", "Legacy"), legacy_id)
-    check("no duplicate row was created",
-          main.connect().execute(
-              "SELECT COUNT(*) FROM users WHERE LOWER(email) = ?",
-              ("mixedcase@legacy.local",)).fetchone()[0], 1)
-    check("sharing with a differently-cased address finds the user",
-          owner.post(f"/api/lists/{list_id}/share",
-                     json={"email": "MIXEDCASE@LEGACY.LOCAL"}).json()["status"], "shared")
+        limiter.reset()
+        self.assertTrue(limiter.check("general", "k", 2, 60)[0])
 
-    print("== input length limits ==")
-    check("oversized task title is rejected",
-          owner.post(f"/api/lists/{list_id}/tasks", json={"title": "A" * 501}).status_code, 422)
-    check("oversized list title is rejected",
-          owner.post("/api/lists", json={"title": "B" * 201}).status_code, 422)
-    check("empty title is rejected",
-          owner.post(f"/api/lists/{list_id}/tasks", json={"title": ""}).status_code, 422)
-    check("a normal title still works",
-          owner.post(f"/api/lists/{list_id}/tasks", json={"title": "Eggs"}).status_code, 200)
-    check("oversized share email is rejected",
-          owner.post(f"/api/lists/{list_id}/share", json={"email": "x" * 300}).status_code, 422)
+    def test_limiter_tiers_are_independent(self):
+        limiter = ratelimit.SlidingWindowLimiter()
+        self.assertTrue(limiter.check("general", "k", 1, 60)[0])
+        self.assertFalse(limiter.check("general", "k", 1, 60)[0])
+        self.assertTrue(limiter.check("auth", "k", 1, 60)[0])
 
-    print("== body validation ==")
-    check(
-        "PATCH invalid status value",
-        owner.patch(f"/api/tasks/{task_id}", json={"status": "evil"}).status_code,
-        422,
-    )
-    check(
-        "PATCH malformed JSON",
-        owner.patch(
-            f"/api/tasks/{task_id}",
-            content="{not json",
-            headers={"content-type": "application/json"},
-        ).status_code,
-        422,
-    )
 
-    print("== deleting a list cascades to its tasks and shares ==")
-    conn = connect()
-    before = conn.execute(
-        "SELECT COUNT(*) FROM tasks WHERE list_id = ?", (list_id,)
-    ).fetchone()[0]
-    conn.close()
-    check("tasks existed before delete", before >= 1, True)
+class MigrationTests(unittest.TestCase):
+    def test_schema_version_is_current(self):
+        self.assertEqual(database.init_db(), database.SCHEMA_VERSION)
 
-    owner.delete(f"/api/lists/{list_id}")
+    def test_migrations_are_idempotent(self):
+        first = database.init_db()
+        second = database.init_db()
+        self.assertEqual(first, second)
+        self.assertEqual(first, database.SCHEMA_VERSION)
 
-    conn = connect()
-    remaining = conn.execute(
-        "SELECT COUNT(*) FROM tasks WHERE list_id = ?", (list_id,)
-    ).fetchone()[0]
-    orphans = conn.execute(
-        "SELECT COUNT(*) FROM tasks t LEFT JOIN lists l ON t.list_id = l.id WHERE l.id IS NULL"
-    ).fetchone()[0]
-    conn.close()
-    check("tasks for the deleted list are gone", remaining, 0)
-    check("no orphaned tasks remain", orphans, 0)
+    def test_legacy_database_upgrades_without_data_loss(self):
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        try:
+            for statement in database.BASE_SCHEMA:
+                conn.execute(statement)
 
-    passed = sum(results)
-    print()
-    print(f"{passed}/{len(results)} checks passed")
+            conn.execute("INSERT INTO users (email, name) VALUES ('a@b.c', 'A')")
+            conn.execute("INSERT INTO lists (user_id, title) VALUES (1, 'Chores')")
+            for title in ("one", "two", "three"):
+                conn.execute(
+                    "INSERT INTO tasks (list_id, title, position) VALUES (1, ?, 0)",
+                    (title,),
+                )
 
-    shutil.rmtree(workdir, ignore_errors=True)
-    return 0 if all(results) else 1
+            database._migrate_2(conn)
+            database._migrate_3(conn)
+
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(tasks)")}
+            self.assertTrue({"created_by", "completed_at", "deleted_at"} <= columns)
+
+            list_columns = {row[1] for row in conn.execute("PRAGMA table_info(lists)")}
+            self.assertIn("version", list_columns)
+
+            share_columns = {row[1] for row in conn.execute("PRAGMA table_info(list_shares)")}
+            self.assertIn("role", share_columns)
+
+            tables = {
+                row[0]
+                for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                )
+            }
+            self.assertTrue(
+                {"invite_tokens", "list_blocks", "activity", "idempotency"} <= tables
+            )
+
+            # The old display order was position ASC, id DESC, i.e. newest
+            # first. It must survive the renumbering.
+            positions = {
+                row["id"]: row["position"]
+                for row in conn.execute("SELECT id, position FROM tasks")
+            }
+            self.assertEqual(positions[3], 1024)
+            self.assertEqual(positions[2], 2048)
+            self.assertEqual(positions[1], 3072)
+            self.assertEqual(conn.execute("SELECT version FROM lists").fetchone()[0], 1)
+        finally:
+            conn.close()
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    unittest.main(verbosity=2)
