@@ -148,7 +148,9 @@ function setOffline(value) {
 }
 
 function updateOfflineBanner() {
-  const pending = state.queue.length;
+  // Queued changes belong to a signed-in account. Showing them on the welcome
+  // screen would promise to send work that has no session to send it with.
+  const pending = state.user ? state.queue.length : 0;
   if (state.offline) {
     dom.offlineBanner.hidden = false;
     dom.offlineBanner.textContent = pending
@@ -711,6 +713,10 @@ function applyState(data, { render: shouldRender = true } = {}) {
   render();
   if (taskId !== null) focusTask(taskId);
   if (addFocused) focusAdd();
+
+  // Someone joining or changing roles should show up without closing and
+  // reopening the share dialog.
+  if (dom.shareDialog.open) renderShare();
 }
 
 async function loadState() {

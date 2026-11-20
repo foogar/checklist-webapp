@@ -100,6 +100,7 @@ A hardened unit file lives at `deploy/checklist.service`. It assumes:
 
 ```bash
 sudo cp deploy/checklist.service /etc/systemd/system/
+sudo install -d -o checklist -g checklist /var/lib/checklist
 sudo systemctl daemon-reload
 sudo systemctl enable --now checklist
 ```
