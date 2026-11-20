@@ -232,6 +232,11 @@
         <button type="submit" class="button button-primary">Add</button>
       </form>
 
+      <form class="filter-form" data-action="filter" hidden>
+        <label class="visually-hidden" for="task-filter">Filter items</label>
+        <input id="task-filter" type="search" placeholder="Filter items…" autocomplete="off">
+      </form>
+
       <ul class="tasks" data-slot="pending"></ul>
       <p class="empty" data-slot="no-pending" hidden>Nothing left. Add an item above.</p>
 

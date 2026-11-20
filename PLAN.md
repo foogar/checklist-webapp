@@ -4,7 +4,9 @@ Rebuild of `foogar/checklist-webapp` on a `v2` branch of the same repository.
 Goal: remove third-party dependencies without giving up a production-grade
 server, and close the gap between the app's name and its behaviour.
 
-Status: **planning**. Nothing in the existing repository has been changed.
+Status: **implemented** on the `v2` branch. This file records the design
+decisions and is kept for context; `README.md` is the current user
+documentation.
 
 ---
 

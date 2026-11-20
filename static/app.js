@@ -29,6 +29,8 @@ const state = {
   newInviteUrl: "",
   activityOpen: false,
   editing: false,
+  filter: "",
+  dragId: null,
   // Preserved across re-renders so toggling a task cannot eat a half-typed
   // item in the add field.
   draft: "",
@@ -467,6 +469,10 @@ function renderWorkspace() {
     form.elements.title.value = state.draft;
   }
 
+  const filterForm = section.querySelector('[data-action="filter"]');
+  filterForm.hidden = state.tasks.length < 6;
+  section.querySelector("#task-filter").value = state.filter;
+
   renderTasks(section);
   renderPresence(section);
   renderActivity(section, list);
@@ -474,12 +480,27 @@ function renderWorkspace() {
 }
 
 function renderTasks(section) {
-  const pending = state.tasks.filter((task) => task.status === "pending");
-  const completed = state.tasks.filter((task) => task.status === "completed");
+  const needle = state.filter.trim().toLowerCase();
+  const matches = (task) => !needle || task.title.toLowerCase().includes(needle);
+
+  const pending = state.tasks.filter(
+    (task) => task.status === "pending" && matches(task)
+  );
+  const completed = state.tasks.filter(
+    (task) => task.status === "completed" && matches(task)
+  );
 
   const pendingList = section.querySelector('[data-slot="pending"]');
   for (const task of pending) pendingList.append(buildTask(task, true));
-  section.querySelector('[data-slot="no-pending"]').hidden = pending.length > 0;
+
+  const empty = section.querySelector('[data-slot="no-pending"]');
+  if (needle && pending.length === 0 && completed.length === 0) {
+    empty.hidden = false;
+    empty.textContent = `No items match “${state.filter.trim()}”.`;
+  } else {
+    empty.hidden = pending.length > 0;
+    empty.textContent = "Nothing left. Add an item above.";
+  }
 
   const completedSection = section.querySelector('[data-slot="completed"]');
   completedSection.hidden = completed.length === 0;
@@ -492,15 +513,20 @@ function buildTask(task, isPending) {
   const row = fragment.querySelector(".task");
   row.dataset.taskId = String(task.id);
 
+  if (isPending && state.editing) {
+    row.draggable = true;
+    row.classList.add("draggable");
+  }
+
   const check = row.querySelector(".task-check");
   check.checked = !isPending;
 
   fill(fragment, "title", task.title);
 
   if (!isPending) {
-    const who = task.completed_by_name || "Someone";
+    const who = task.completed_by_name;
     const when = relativeTime(task.completed_at);
-    fill(fragment, "meta", when ? `${who} · ${when}` : who);
+    fill(fragment, "meta", [who, when].filter(Boolean).join(" · "));
   }
 
   if (!isPending) {
@@ -784,6 +810,7 @@ async function openList(id, { push = true } = {}) {
   state.activeId = id;
   state.editing = false;
   state.draft = "";
+  state.filter = "";
   state.activity = [];
   state.presence = [];
   state.activityOpen = false;
@@ -810,6 +837,7 @@ async function showOverview({ push = true } = {}) {
   state.activeId = null;
   state.editing = false;
   state.tasks = [];
+  state.filter = "";
   state.activity = [];
   state.presence = [];
   state.draft = "";
@@ -963,19 +991,13 @@ async function restoreTask(task) {
   }
 }
 
-async function moveTask(taskId, direction) {
-  const pending = state.tasks.filter((task) => task.status === "pending");
-  const index = pending.findIndex((task) => task.id === taskId);
-  const target = direction === "up" ? index - 1 : index + 1;
-  if (index < 0 || target < 0 || target >= pending.length) return;
+async function saveOrder() {
+  if (state.activeId === null) return;
 
-  [pending[index], pending[target]] = [pending[target], pending[index]];
-  const completed = state.tasks.filter((task) => task.status === "completed");
-  state.tasks = [...pending, ...completed];
-  state.tasks.forEach((task, position) => {
-    task.position = (position + 1) * 1024;
-  });
-  render();
+  if (state.tasks.some((task) => task.id < 0)) {
+    toast("The new order will be saved once the item syncs.");
+    return;
+  }
 
   try {
     const data = await apiJson(`/api/lists/${state.activeId}/reorder`, {
@@ -986,13 +1008,9 @@ async function moveTask(taskId, direction) {
     afterMutation(data);
   } catch (error) {
     if (isOffline(error)) {
-      if (state.tasks.some((task) => task.id < 0)) {
-        toast("The new order will be saved once the item syncs.");
-      } else {
-        enqueue("POST", `/api/lists/${state.activeId}/reorder`, {
-          task_ids: state.tasks.map((task) => task.id),
-        });
-      }
+      enqueue("POST", `/api/lists/${state.activeId}/reorder`, {
+        task_ids: state.tasks.map((task) => task.id),
+      });
     } else {
       if (error.status === 409) {
         toast("Someone changed this list — refreshed.");
@@ -1007,6 +1025,39 @@ async function moveTask(taskId, direction) {
       render();
     }
   }
+}
+
+function applyOrder(pending) {
+  const completed = state.tasks.filter((task) => task.status === "completed");
+  state.tasks = [...pending, ...completed];
+  state.tasks.forEach((task, position) => {
+    task.position = (position + 1) * 1024;
+  });
+  render();
+}
+
+async function moveTask(taskId, direction) {
+  const pending = state.tasks.filter((task) => task.status === "pending");
+  const index = pending.findIndex((task) => task.id === taskId);
+  const target = direction === "up" ? index - 1 : index + 1;
+  if (index < 0 || target < 0 || target >= pending.length) return;
+
+  [pending[index], pending[target]] = [pending[target], pending[index]];
+  applyOrder(pending);
+  await saveOrder();
+}
+
+function dropTask(dragId, targetId) {
+  if (dragId === targetId) return;
+  const pending = state.tasks.filter((task) => task.status === "pending");
+  const from = pending.findIndex((task) => task.id === dragId);
+  const to = pending.findIndex((task) => task.id === targetId);
+  if (from < 0 || to < 0) return;
+
+  const [moved] = pending.splice(from, 1);
+  pending.splice(to, 0, moved);
+  applyOrder(pending);
+  saveOrder();
 }
 
 async function resetList() {
@@ -1510,7 +1561,70 @@ function wireEvents() {
   });
 
   dom.main.addEventListener("input", (event) => {
-    if (event.target.id === "new-task") state.draft = event.target.value;
+    if (event.target.id === "new-task") {
+      state.draft = event.target.value;
+      return;
+    }
+    if (event.target.id === "task-filter") {
+      state.filter = event.target.value;
+      render();
+      const input = document.getElementById("task-filter");
+      if (input) {
+        input.focus();
+        const length = input.value.length;
+        input.setSelectionRange(length, length);
+      }
+    }
+  });
+
+  // -- drag to reorder (mouse; the arrow buttons remain for touch and keys) --
+
+  dom.main.addEventListener("dragstart", (event) => {
+    const row = event.target.closest(".task");
+    if (!row || !row.draggable) return;
+    state.dragId = Number(row.dataset.taskId);
+    row.classList.add("dragging");
+    if (event.dataTransfer) {
+      event.dataTransfer.effectAllowed = "move";
+      event.dataTransfer.setData("text/plain", row.dataset.taskId);
+    }
+  });
+
+  dom.main.addEventListener("dragover", (event) => {
+    if (state.dragId === null) return;
+    const row = event.target.closest(".task");
+    if (!row || !row.draggable) return;
+    event.preventDefault();
+    if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
+    document
+      .querySelectorAll(".task.drop-target")
+      .forEach((element) => element.classList.remove("drop-target"));
+    row.classList.add("drop-target");
+  });
+
+  dom.main.addEventListener("dragleave", (event) => {
+    const row = event.target.closest(".task");
+    if (row) row.classList.remove("drop-target");
+  });
+
+  dom.main.addEventListener("drop", (event) => {
+    if (state.dragId === null) return;
+    const row = event.target.closest(".task");
+    if (!row || !row.draggable) return;
+    event.preventDefault();
+    const dragId = state.dragId;
+    state.dragId = null;
+    row.classList.remove("drop-target");
+    dropTask(dragId, Number(row.dataset.taskId));
+  });
+
+  dom.main.addEventListener("dragend", () => {
+    state.dragId = null;
+    document
+      .querySelectorAll(".task.dragging, .task.drop-target")
+      .forEach((element) => {
+        element.classList.remove("dragging", "drop-target");
+      });
   });
 
   // -- sharing dialog --------------------------------------------------

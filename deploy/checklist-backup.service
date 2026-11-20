@@ -1,0 +1,7 @@
+[Unit]
+Description=Back up Collaborative Checklists
+
+[Service]
+Type=oneshot
+User=checklist
+ExecStart=/opt/checklist/deploy/backup.sh
