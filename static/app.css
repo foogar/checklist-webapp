@@ -35,8 +35,11 @@
   --radius: 0.75rem;
   --radius-lg: 1rem;
 
-  --shadow-sm: 0 1px 2px rgb(15 23 42 / 0.06);
-  --shadow: 0 1px 3px rgb(15 23 42 / 0.08), 0 1px 2px rgb(15 23 42 / 0.04);
+  --shadow-sm: 0 1px 2px rgb(15 23 42 / 0.06), 0 1px 1px rgb(15 23 42 / 0.04);
+  --shadow: 0 1px 3px rgb(15 23 42 / 0.08), 0 8px 20px -6px rgb(15 23 42 / 0.16);
+  --shadow-card: 0 1px 2px rgb(15 23 42 / 0.06), 0 6px 16px -4px rgb(15 23 42 / 0.14);
+  --shadow-raised: 0 2px 4px rgb(15 23 42 / 0.06), 0 14px 28px -8px rgb(15 23 42 / 0.18);
+  --shadow-topbar: 0 1px 2px rgb(15 23 42 / 0.05), 0 6px 16px -8px rgb(15 23 42 / 0.14);
 
   --tap: 2.75rem;
 }
@@ -66,7 +69,10 @@
     --amber-text: #fcd34d;
 
     --shadow-sm: 0 1px 2px rgb(0 0 0 / 0.4);
-    --shadow: 0 1px 3px rgb(0 0 0 / 0.5);
+    --shadow: 0 2px 8px rgb(0 0 0 / 0.45);
+    --shadow-card: 0 1px 2px rgb(0 0 0 / 0.45), 0 8px 22px -6px rgb(0 0 0 / 0.55);
+    --shadow-raised: 0 2px 6px rgb(0 0 0 / 0.5), 0 18px 36px -10px rgb(0 0 0 / 0.65);
+    --shadow-topbar: 0 1px 2px rgb(0 0 0 / 0.45), 0 8px 20px -10px rgb(0 0 0 / 0.55);
   }
 }
 
@@ -94,7 +100,10 @@
   --amber-text: #fcd34d;
 
   --shadow-sm: 0 1px 2px rgb(0 0 0 / 0.4);
-  --shadow: 0 1px 3px rgb(0 0 0 / 0.5);
+  --shadow: 0 2px 8px rgb(0 0 0 / 0.45);
+  --shadow-card: 0 1px 2px rgb(0 0 0 / 0.45), 0 8px 22px -6px rgb(0 0 0 / 0.55);
+  --shadow-raised: 0 2px 6px rgb(0 0 0 / 0.5), 0 18px 36px -10px rgb(0 0 0 / 0.65);
+  --shadow-topbar: 0 1px 2px rgb(0 0 0 / 0.45), 0 8px 20px -10px rgb(0 0 0 / 0.55);
 }
 
 /* ---------------------------------------------------------------- reset */
@@ -180,6 +189,7 @@ a {
   background: color-mix(in srgb, var(--bg) 88%, transparent);
   backdrop-filter: blur(8px);
   border-bottom: 1px solid var(--border);
+  box-shadow: var(--shadow-topbar);
 }
 
 .brand {
@@ -444,6 +454,10 @@ a {
   flex-wrap: wrap;
 }
 
+.section-actions .button {
+  box-shadow: var(--shadow-sm);
+}
+
 .section-title {
   font-size: 1.125rem;
   letter-spacing: -0.01em;
@@ -470,13 +484,13 @@ a {
   background: var(--surface);
   color: var(--text);
   text-align: left;
-  box-shadow: var(--shadow-sm);
+  box-shadow: var(--shadow-card);
   transition: border-color 0.15s ease, box-shadow 0.15s ease;
 }
 
 .list-card-button:hover {
   border-color: var(--primary);
-  box-shadow: var(--shadow);
+  box-shadow: var(--shadow-raised);
 }
 
 .list-card-top {
@@ -530,7 +544,7 @@ a {
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
-  box-shadow: var(--shadow-sm);
+  box-shadow: var(--shadow-card);
 }
 
 .workspace-head {
