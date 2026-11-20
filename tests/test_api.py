@@ -565,6 +565,51 @@ class ListApiTests(unittest.TestCase):
             404,
         )
 
+    def test_idempotent_create_replays_the_first_response(self):
+        created = self.make_list()
+        headers = {
+            "x-csrf-token": "csrf-owner",
+            "idempotency-key": "queue-op-12345678",
+        }
+        first = self.client.post(
+            f"/api/lists/{created['id']}/tasks",
+            json_body={"title": "Milk"},
+            headers=headers,
+        )
+        second = self.client.post(
+            f"/api/lists/{created['id']}/tasks",
+            json_body={"title": "Milk"},
+            headers=headers,
+        )
+        self.assertEqual((first.status, second.status), (201, 201))
+        self.assertEqual(first.json()["task"]["id"], second.json()["task"]["id"])
+        self.assertEqual(second.headers["idempotent-replay"], "true")
+
+        tasks = self.client.get(f"/api/lists/{created['id']}/tasks").json()["tasks"]
+        self.assertEqual(len(tasks), 1)
+
+        different = self.client.post(
+            f"/api/lists/{created['id']}/tasks",
+            json_body={"title": "Milk"},
+            headers={
+                "x-csrf-token": "csrf-owner",
+                "idempotency-key": "queue-op-87654321",
+            },
+        )
+        self.assertEqual(different.status, 201)
+        self.assertNotEqual(
+            different.json()["task"]["id"], first.json()["task"]["id"]
+        )
+
+    def test_idempotency_key_is_validated(self):
+        created = self.make_list()
+        response = self.client.post(
+            f"/api/lists/{created['id']}/tasks",
+            json_body={"title": "Milk"},
+            headers={"x-csrf-token": "csrf-owner", "idempotency-key": "bad key!"},
+        )
+        self.assertEqual(response.status, 422)
+
     # -- roles and blocks ----------------------------------------------
 
     def test_viewer_can_read_but_not_write(self):

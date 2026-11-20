@@ -34,6 +34,8 @@ const state = {
   draft: "",
   clientId: "",
   inflight: 0,
+  queue: [],
+  flushing: false,
   pollTimer: null,
   pollCount: 0,
   lastInteraction: Date.now(),
@@ -132,9 +134,30 @@ class ApiError extends Error {
   }
 }
 
+// A dropped connection surfaces as a thrown fetch; a dead origin behind a
+// proxy surfaces as a well-formed 5xx. Both mean "keep this change and retry".
+function isOffline(error) {
+  return !error || error.status === 0 || error.status >= 500;
+}
+
 function setOffline(value) {
   state.offline = value;
-  dom.offlineBanner.hidden = !value;
+  updateOfflineBanner();
+}
+
+function updateOfflineBanner() {
+  const pending = state.queue.length;
+  if (state.offline) {
+    dom.offlineBanner.hidden = false;
+    dom.offlineBanner.textContent = pending
+      ? `Offline — ${pending} change${pending === 1 ? "" : "s"} will be sent when you reconnect.`
+      : "Offline — checklists cannot be loaded or changed until the connection is back.";
+  } else if (pending) {
+    dom.offlineBanner.hidden = false;
+    dom.offlineBanner.textContent = `Sending ${pending} change${pending === 1 ? "" : "s"}…`;
+  } else {
+    dom.offlineBanner.hidden = true;
+  }
 }
 
 async function apiFetch(path, options = {}) {
@@ -195,6 +218,127 @@ async function apiJson(path, options = {}) {
     );
   }
   return data;
+}
+
+// --------------------------------------------------------------- offline queue
+
+const QUEUE_KEY = "checklist-queue";
+
+function loadQueue() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(QUEUE_KEY) || "[]");
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (error) {
+    return [];
+  }
+}
+
+function saveQueue() {
+  try {
+    localStorage.setItem(QUEUE_KEY, JSON.stringify(state.queue));
+  } catch (error) {
+    // Storage blocked: the queue still works for this page's lifetime.
+  }
+}
+
+function enqueue(method, path, body, options = {}) {
+  state.queue.push({
+    id: makeClientId(),
+    userId: state.user ? state.user.id : null,
+    listId: state.activeId,
+    method,
+    path,
+    body: body === undefined ? null : body,
+    tempId: options.tempId || null,
+  });
+  saveQueue();
+  updateOfflineBanner();
+  window.setTimeout(flushQueue, 1500);
+}
+
+function remapTempId(tempId, realId) {
+  for (const op of state.queue) {
+    op.path = op.path.replace(`/api/tasks/${tempId}`, `/api/tasks/${realId}`);
+    if (op.body && Array.isArray(op.body.task_ids)) {
+      op.body.task_ids = op.body.task_ids.map((id) =>
+        id === tempId ? realId : id
+      );
+    }
+  }
+  const task = state.tasks.find((entry) => entry.id === tempId);
+  if (task) task.id = realId;
+  saveQueue();
+}
+
+async function flushQueue() {
+  if (state.flushing || state.queue.length === 0 || !state.user) return;
+
+  state.flushing = true;
+  updateOfflineBanner();
+
+  let touchedList = null;
+  let sent = 0;
+
+  while (state.queue.length > 0) {
+    const op = state.queue[0];
+    // A different account's queue is left alone rather than sent under this
+    // session.
+    if (op.userId !== state.user.id) break;
+
+    const response = await apiFetch(op.path, {
+      method: op.method,
+      body: op.body === null ? undefined : op.body,
+      headers: { "Idempotency-Key": op.id },
+    });
+
+    if (!response) break; // still offline
+    if (response.status === 401) break;
+    if (response.status >= 500) break;
+
+    if (response.status === 409) {
+      // The list moved on. Applying a stale order would undo someone's work.
+      state.queue.shift();
+      saveQueue();
+      touchedList = op.listId || touchedList;
+      continue;
+    }
+
+    if (response.status >= 400 && response.status !== 404) {
+      // Validation or permission failure: retrying cannot succeed.
+      state.queue.shift();
+      saveQueue();
+      toast("A saved change could not be applied.");
+      continue;
+    }
+
+    if (op.tempId && response.status < 300) {
+      try {
+        const data = await response.json();
+        if (data && data.task) remapTempId(op.tempId, data.task.id);
+      } catch (error) {
+        // The full state fetch below reconciles anyway.
+      }
+    }
+
+    state.queue.shift();
+    saveQueue();
+    sent += 1;
+    touchedList = op.listId || touchedList;
+  }
+
+  state.flushing = false;
+  updateOfflineBanner();
+
+  if (sent > 0 && state.queue.length === 0 && touchedList !== null) {
+    try {
+      await refreshLists();
+      if (state.activeId !== null) await loadState();
+      render();
+      toast("All saved changes are in.");
+    } catch (error) {
+      // The banner still reflects anything left in the queue.
+    }
+  }
 }
 
 // -------------------------------------------------------------------- render
@@ -616,6 +760,7 @@ function afterMutation(data) {
   // even though this client already knows the new version.
   state.pollCount = 0;
   nudgePoll();
+  if (state.queue.length > 0) window.setTimeout(flushQueue, 500);
 }
 
 function sortTasks() {
@@ -697,7 +842,34 @@ async function addTask(form) {
     render();
     focusAdd();
   } catch (error) {
-    toast(error.message);
+    if (isOffline(error) && state.activeId !== null) {
+      // Offline: keep the optimistic item with a negative id, and let the
+      // queue replace it with the server's row when the connection returns.
+      const tempId = -Date.now();
+      const position =
+        state.tasks.reduce((max, task) => Math.max(max, task.position || 0), 0) +
+        1024;
+      state.tasks.push({
+        id: tempId,
+        title,
+        status: "pending",
+        position,
+        created_by: state.user ? state.user.id : null,
+        created_by_name: state.user ? state.user.name : null,
+        completed_at: null,
+        completed_by: null,
+        completed_by_name: null,
+        temp: true,
+      });
+      state.draft = "";
+      syncCounts();
+      enqueue("POST", `/api/lists/${state.activeId}/tasks`, { title }, { tempId });
+      render();
+      focusAdd();
+      toast("Saved on this device. It will be sent when you reconnect.");
+    } else {
+      toast(error.message);
+    }
   }
 }
 
@@ -728,8 +900,12 @@ async function toggleTask(taskId) {
     Object.assign(task, data.task);
     afterMutation(data);
   } catch (error) {
-    Object.assign(task, previous);
-    toast(error.message);
+    if (isOffline(error)) {
+      enqueue("PATCH", `/api/tasks/${taskId}`, { status: next });
+    } else {
+      Object.assign(task, previous);
+      toast(error.message);
+    }
   }
   syncCounts();
   render();
@@ -747,16 +923,22 @@ async function deleteTask(taskId) {
   try {
     const data = await apiJson(`/api/tasks/${taskId}`, { method: "DELETE" });
     afterMutation(data);
-    toast("Item deleted", { actionLabel: "Undo", onAction: () => restoreTask(taskId) });
+    toast("Item deleted", { actionLabel: "Undo", onAction: () => restoreTask(task) });
   } catch (error) {
-    state.tasks.splice(index, 0, task);
-    syncCounts();
-    render();
-    toast(error.message);
+    if (isOffline(error)) {
+      enqueue("DELETE", `/api/tasks/${taskId}`);
+      toast("Item deleted", { actionLabel: "Undo", onAction: () => restoreTask(task) });
+    } else {
+      state.tasks.splice(index, 0, task);
+      syncCounts();
+      render();
+      toast(error.message);
+    }
   }
 }
 
-async function restoreTask(taskId) {
+async function restoreTask(task) {
+  const taskId = typeof task === "number" ? task : task.id;
   try {
     const data = await apiJson(`/api/tasks/${taskId}/restore`, { method: "POST" });
     state.tasks.push(data.task);
@@ -766,7 +948,18 @@ async function restoreTask(taskId) {
     render();
     toast("Item restored");
   } catch (error) {
-    toast(error.message);
+    if (isOffline(error)) {
+      if (typeof task !== "number") {
+        state.tasks.push(task);
+        sortTasks();
+        syncCounts();
+        render();
+      }
+      enqueue("POST", `/api/tasks/${taskId}/restore`);
+      toast("Restored on this device. It will be sent when you reconnect.");
+    } else {
+      toast(error.message);
+    }
   }
 }
 
@@ -792,17 +985,27 @@ async function moveTask(taskId, direction) {
     });
     afterMutation(data);
   } catch (error) {
-    if (error.status === 409) {
-      toast("Someone changed this list — refreshed.");
+    if (isOffline(error)) {
+      if (state.tasks.some((task) => task.id < 0)) {
+        toast("The new order will be saved once the item syncs.");
+      } else {
+        enqueue("POST", `/api/lists/${state.activeId}/reorder`, {
+          task_ids: state.tasks.map((task) => task.id),
+        });
+      }
     } else {
-      toast(error.message);
+      if (error.status === 409) {
+        toast("Someone changed this list — refreshed.");
+      } else {
+        toast(error.message);
+      }
+      try {
+        await loadState();
+      } catch (reloadError) {
+        /* the toast already explains the problem */
+      }
+      render();
     }
-    try {
-      await loadState();
-    } catch (reloadError) {
-      /* the toast already explains the problem */
-    }
-    render();
   }
 }
 
@@ -825,7 +1028,21 @@ async function resetList() {
     render();
     toast("List reset");
   } catch (error) {
-    toast(error.message);
+    if (isOffline(error)) {
+      state.tasks = state.tasks.map((task) => ({
+        ...task,
+        status: "pending",
+        completed_at: null,
+        completed_by: null,
+        completed_by_name: null,
+      }));
+      syncCounts();
+      render();
+      enqueue("POST", `/api/lists/${list.id}/reset`);
+      toast("Reset saved on this device. It will be sent when you reconnect.");
+    } else {
+      toast(error.message);
+    }
   }
 }
 
@@ -1410,6 +1627,7 @@ function wireEvents() {
   window.addEventListener("online", async () => {
     setOffline(false);
     if (!state.user) return;
+    await flushQueue();
     try {
       if (state.activeId !== null) await loadState();
       else await refreshLists();
@@ -1420,6 +1638,12 @@ function wireEvents() {
     }
   });
   window.addEventListener("offline", () => setOffline(true));
+
+  // A quiet retry: the browser can still think it is online while the origin
+  // is down, and the `online` event never fires in that case.
+  window.setInterval(() => {
+    if (state.queue.length > 0 && !state.flushing) flushQueue();
+  }, 15000);
 
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState === "visible") {
@@ -1482,6 +1706,7 @@ async function loadMe() {
 
 async function boot() {
   state.clientId = loadClientId();
+  state.queue = loadQueue();
   applyStoredTheme();
   // Enable the colour transition only once the stored theme is in place.
   requestAnimationFrame(() => document.body.classList.add("theme-ready"));
@@ -1505,6 +1730,8 @@ async function boot() {
     const wanted = routeFromHash();
     if (wanted !== null) await openList(wanted, { push: false });
     else render();
+
+    if (state.queue.length > 0) flushQueue();
   }
 
   registerServiceWorker();

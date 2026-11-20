@@ -11,6 +11,7 @@ with a single integer instead of comparing rows.
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 import secrets
 import sqlite3
@@ -656,8 +657,32 @@ def register(route) -> None:
         data = _body(request)
         title = _text(data, "title", MAX_TASK_TITLE)
 
+        # An offline client retries a queued create with the same key. The
+        # stored response is replayed instead of inserting a second task, so a
+        # lost response cannot turn one item into two.
+        key = request.header("idempotency-key").strip()
+        if key and not re.fullmatch(r"[A-Za-z0-9_-]{8,100}", key):
+            raise HTTPError(422, "Invalid Idempotency-Key")
+
         with connection() as conn:
             _require(conn, list_id, user["id"], write=True)
+
+            if key:
+                replay = conn.execute(
+                    "SELECT status, response_json FROM idempotency "
+                    "WHERE key = ? AND user_id = ?",
+                    (key, user["id"]),
+                ).fetchone()
+                if replay:
+                    return Response(
+                        status=replay["status"],
+                        body=replay["response_json"].encode("utf-8"),
+                        headers={
+                            "Content-Type": "application/json; charset=utf-8",
+                            "Idempotent-Replay": "true",
+                        },
+                    )
+
             with transaction(conn):
                 position = conn.execute(
                     "SELECT COALESCE(MAX(position), 0) + ? FROM tasks WHERE list_id = ?",
@@ -672,9 +697,34 @@ def register(route) -> None:
                 task_id = cursor.lastrowid
                 _touch(conn, list_id)
                 _record(conn, list_id, user["id"], "task.added", task_id, title)
-            result = _fetch_task(conn, task_id)
-            version = _version(conn, list_id)
-        return json_response({"task": result, "version": version}, status=201)
+
+                payload = {
+                    "task": _fetch_task(conn, task_id),
+                    "version": _version(conn, list_id),
+                }
+                if key:
+                    conn.execute(
+                        "INSERT OR REPLACE INTO idempotency "
+                        "(key, user_id, status, response_json, created_at) "
+                        "VALUES (?, ?, ?, ?, ?)",
+                        (
+                            key,
+                            user["id"],
+                            201,
+                            json.dumps(
+                                payload, separators=(",", ":"), ensure_ascii=False
+                            ),
+                            utcnow(),
+                        ),
+                    )
+                    cutoff = (
+                        datetime.now(dt_timezone.utc) - timedelta(hours=24)
+                    ).isoformat(timespec="seconds").replace("+00:00", "Z")
+                    conn.execute(
+                        "DELETE FROM idempotency WHERE created_at < ?", (cutoff,)
+                    )
+
+        return json_response(payload, status=201)
 
     @route("PATCH", r"/api/tasks/(?P<task_id>\d+)")
     async def update_task(request: Request) -> Response:
