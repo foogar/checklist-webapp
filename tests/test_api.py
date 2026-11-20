@@ -39,6 +39,7 @@ sys.path.insert(0, str(TESTS_DIR))
 import auth  # noqa: E402
 import database  # noqa: E402
 import main  # noqa: E402
+import presence  # noqa: E402
 import ratelimit  # noqa: E402
 from config import settings  # noqa: E402
 from asgi_client import TestClient  # noqa: E402
@@ -75,6 +76,7 @@ def override(**values):
 
 def reset_database() -> None:
     database.init_db()
+    presence.clear()
     with database.connection() as conn:
         for table in TABLES:
             conn.execute(f"DELETE FROM {table}")
@@ -613,6 +615,108 @@ class ListApiTests(unittest.TestCase):
         self.assertEqual(response.status, 201)
         listing = self.other.get("/api/lists").json()["lists"]
         self.assertEqual(listing[0]["role"], "editor")
+
+    # -- state, activity, presence --------------------------------------
+
+    def test_state_returns_everything_and_304_when_unchanged(self):
+        created = self.make_list()
+        self.make_task(created["id"], "Milk")
+
+        state = self.client.get(f"/api/lists/{created['id']}/state").json()
+        self.assertEqual(state["version"], 2)
+        self.assertEqual([task["title"] for task in state["tasks"]], ["Milk"])
+        self.assertEqual(state["list"]["title"], "Chores")
+        for key in ("activity", "presence", "members", "server_time"):
+            self.assertIn(key, state)
+
+        unchanged = self.client.get(
+            f"/api/lists/{created['id']}/state?since={state['version']}"
+        )
+        self.assertEqual(unchanged.status, 304)
+        self.assertEqual(unchanged.body, b"")
+
+        changed = self.client.get(f"/api/lists/{created['id']}/state?since=1")
+        self.assertEqual(changed.status, 200)
+
+    def test_state_records_activity_with_names(self):
+        created = self.make_list()
+        task = self.make_task(created["id"], "Milk")
+        self.patch(f"/api/tasks/{task['id']}", {"status": "completed"})
+
+        state = self.client.get(f"/api/lists/{created['id']}/state").json()
+        actions = [entry["action"] for entry in state["activity"]]
+        self.assertEqual(actions[0], "task.completed")
+        self.assertIn("task.added", actions)
+        self.assertIn("list.created", actions)
+
+        newest = state["activity"][0]
+        self.assertEqual(newest["user_name"], "Owner")
+        self.assertEqual(newest["detail"], "Milk")
+
+    def test_state_requires_access(self):
+        created = self.make_list()
+        self.assertEqual(
+            self.other.get(f"/api/lists/{created['id']}/state").status, 404
+        )
+
+    def test_presence_lists_everyone_viewing(self):
+        created = self.make_list()
+        with database.connection() as conn:
+            conn.execute(
+                "INSERT INTO list_shares (list_id, user_id, role) VALUES (?, ?, 'editor')",
+                (created["id"], self.other_uid),
+            )
+
+        self.client.get(
+            f"/api/lists/{created['id']}/state",
+            headers={"x-client-id": "client-owner-1"},
+        )
+        state = self.other.get(
+            f"/api/lists/{created['id']}/state",
+            headers={"x-client-id": "client-other-2"},
+        ).json()
+
+        names = {entry["name"] for entry in state["presence"]}
+        self.assertIn("Owner", names)
+        self.assertIn("Other", names)
+
+    def test_if_match_rejects_a_stale_version(self):
+        created = self.make_list()
+        first = self.make_task(created["id"], "one")
+        second = self.make_task(created["id"], "two")
+        current = self.client.get(f"/api/lists/{created['id']}/state").json()["version"]
+        ids = [second["id"], first["id"]]
+
+        stale = self.client.post(
+            f"/api/lists/{created['id']}/reorder",
+            json_body={"task_ids": ids},
+            headers={"x-csrf-token": "csrf-owner", "if-match": str(current - 1)},
+        )
+        self.assertEqual(stale.status, 409)
+
+        fresh = self.client.post(
+            f"/api/lists/{created['id']}/reorder",
+            json_body={"task_ids": ids},
+            headers={"x-csrf-token": "csrf-owner", "if-match": str(current)},
+        )
+        self.assertEqual(fresh.status, 200)
+
+    def test_if_match_on_rename(self):
+        created = self.make_list()
+        stale = self.client.patch(
+            f"/api/lists/{created['id']}",
+            json_body={"title": "Renamed"},
+            headers={"x-csrf-token": "csrf-owner", "if-match": "99"},
+        )
+        self.assertEqual(stale.status, 409)
+
+        fresh = self.client.patch(
+            f"/api/lists/{created['id']}",
+            json_body={"title": "Renamed"},
+            headers={"x-csrf-token": "csrf-owner", "if-match": "1"},
+        )
+        self.assertEqual(fresh.status, 200)
+        self.assertEqual(fresh.json()["title"], "Renamed")
 
 
 class MigrationTests(unittest.TestCase):

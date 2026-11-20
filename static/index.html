@@ -129,6 +129,8 @@
         </div>
       </div>
 
+      <p class="presence" data-slot="presence" hidden></p>
+
       <p class="hint" data-slot="edit-hint" hidden>
         Reordering and delete controls are visible while editing.
       </p>
@@ -146,6 +148,11 @@
         <h2 class="completed-title">Completed</h2>
         <ul class="tasks tasks-done" data-slot="completed-list"></ul>
       </section>
+
+      <details class="activity" data-slot="activity" hidden>
+        <summary>Recent activity</summary>
+        <ul class="activity-list" data-slot="activity-list"></ul>
+      </details>
     </section>
   </template>
 

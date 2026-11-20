@@ -10,10 +10,12 @@ with a single integer instead of comparing rows.
 
 from __future__ import annotations
 
+import re
 import sqlite3
 from typing import Any
 
 import auth
+import presence
 from database import connection, transaction
 from util import utcnow
 from web import HTTPError, Request, Response, json_response, no_content
@@ -26,6 +28,7 @@ LIST_COLUMNS = """
     l.id, l.title, l.is_resettable, l.version, l.created_at, l.user_id,
     u.name AS owner_name,
     CASE WHEN l.user_id = :uid THEN 'owner' ELSE COALESCE(ls.role, 'viewer') END AS role,
+    1 + (SELECT COUNT(*) FROM list_shares s WHERE s.list_id = l.id) AS member_count,
     (SELECT COUNT(*) FROM tasks t
       WHERE t.list_id = l.id AND t.deleted_at IS NULL) AS task_count,
     (SELECT COUNT(*) FROM tasks t
@@ -160,6 +163,7 @@ def _list_json(row: sqlite3.Row) -> dict[str, Any]:
         "is_resettable": bool(row["is_resettable"]),
         "role": row["role"],
         "owner_name": row["owner_name"],
+        "member_count": row["member_count"],
         "version": row["version"],
         "task_count": row["task_count"],
         "pending_count": row["pending_count"],
@@ -220,6 +224,109 @@ def _fetch_task(conn: sqlite3.Connection, task_id: int) -> dict[str, Any]:
     return _task_json(row)
 
 
+def _record(
+    conn: sqlite3.Connection,
+    list_id: int,
+    user_id: int,
+    action: str,
+    task_id: int | None = None,
+    detail: str | None = None,
+) -> None:
+    """Append to the list's activity feed, keeping the last 200 rows.
+
+    The user's name is not stored: it is joined at read time, so a rename
+    updates history rather than leaving stale names behind.
+    """
+    conn.execute(
+        "INSERT INTO activity (list_id, user_id, action, task_id, detail, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (list_id, user_id, action, task_id, detail, utcnow()),
+    )
+    conn.execute(
+        "DELETE FROM activity WHERE list_id = ? AND id NOT IN "
+        "(SELECT id FROM activity WHERE list_id = ? ORDER BY id DESC LIMIT 200)",
+        (list_id, list_id),
+    )
+
+
+def _activity(conn: sqlite3.Connection, list_id: int, limit: int = 20) -> list[dict[str, Any]]:
+    rows = conn.execute(
+        """
+        SELECT a.id, a.action, a.task_id, a.detail, a.created_at,
+               a.user_id, u.name AS user_name
+        FROM activity a
+        LEFT JOIN users u ON u.id = a.user_id
+        WHERE a.list_id = ?
+        ORDER BY a.id DESC
+        LIMIT ?
+        """,
+        (list_id, limit),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def _members(
+    conn: sqlite3.Connection, list_id: int, include_email: bool = False
+) -> list[dict[str, Any]]:
+    members: list[dict[str, Any]] = []
+
+    owner = conn.execute(
+        "SELECT u.id, u.name, u.email FROM lists l "
+        "JOIN users u ON u.id = l.user_id WHERE l.id = ?",
+        (list_id,),
+    ).fetchone()
+    if owner:
+        entry: dict[str, Any] = {
+            "user_id": owner["id"],
+            "name": owner["name"],
+            "role": "owner",
+            "joined_at": None,
+        }
+        if include_email:
+            entry["email"] = owner["email"]
+        members.append(entry)
+
+    for row in conn.execute(
+        """
+        SELECT u.id, u.name, u.email, ls.role, ls.joined_at
+        FROM list_shares ls
+        JOIN users u ON u.id = ls.user_id
+        WHERE ls.list_id = ?
+        ORDER BY LOWER(u.name), u.id
+        """,
+        (list_id,),
+    ):
+        entry = {
+            "user_id": row["id"],
+            "name": row["name"],
+            "role": row["role"],
+            "joined_at": row["joined_at"],
+        }
+        if include_email:
+            entry["email"] = row["email"]
+        members.append(entry)
+
+    return members
+
+
+def _if_match(request: Request) -> int | None:
+    """Read an expected version from If-Match, or None if absent.
+
+    Accepts both `12` and the weak ETag form `W/"12"`, so the client can send
+    whatever it already has without a second convention.
+    """
+    raw = request.header("if-match").strip()
+    if not raw:
+        return None
+    if raw.startswith("W/"):
+        raw = raw[2:]
+    raw = raw.strip('"')
+    try:
+        return int(raw)
+    except ValueError:
+        return None
+
+
 # --------------------------------------------------------------------------
 # Routes
 # --------------------------------------------------------------------------
@@ -253,6 +360,7 @@ def register(route) -> None:
                     (user["id"], title, 1 if resettable else 0, utcnow(), utcnow()),
                 )
                 list_id = cursor.lastrowid
+                _record(conn, list_id, user["id"], "list.created", detail=title)
             result = _fetch_list(conn, list_id, user["id"])
         return json_response(result, status=201)
 
@@ -273,18 +381,23 @@ def register(route) -> None:
 
         assignments: list[str] = []
         values: list[Any] = []
+        new_title: str | None = None
         if "title" in data:
+            new_title = _text(data, "title", MAX_LIST_TITLE)
             assignments.append("title = ?")
-            values.append(_text(data, "title", MAX_LIST_TITLE))
+            values.append(new_title)
         if "is_resettable" in data:
             assignments.append("is_resettable = ?")
             values.append(1 if _flag(data, "is_resettable") else 0)
         if not assignments:
             raise HTTPError(422, "Nothing to update")
 
+        expected = _if_match(request)
         with connection() as conn:
             if _require(conn, list_id, user["id"]) != "owner":
                 raise HTTPError(403, "Only the owner can change this list")
+            if expected is not None and expected != _version(conn, list_id):
+                raise HTTPError(409, "The list changed; reload and try again")
             with transaction(conn):
                 values.extend([utcnow(), list_id])
                 conn.execute(
@@ -292,6 +405,10 @@ def register(route) -> None:
                     "version = version + 1, updated_at = ? WHERE id = ?",
                     values,
                 )
+                if new_title is not None:
+                    _record(conn, list_id, user["id"], "list.renamed", detail=new_title)
+                else:
+                    _record(conn, list_id, user["id"], "list.settings")
             result = _fetch_list(conn, list_id, user["id"])
         return json_response(result)
 
@@ -345,6 +462,7 @@ def register(route) -> None:
                 )
                 task_id = cursor.lastrowid
                 _touch(conn, list_id)
+                _record(conn, list_id, user["id"], "task.added", task_id, title)
             result = _fetch_task(conn, task_id)
             version = _version(conn, list_id)
         return json_response({"task": result, "version": version}, status=201)
@@ -358,10 +476,12 @@ def register(route) -> None:
 
         assignments: list[str] = []
         values: list[Any] = []
+        new_title: str | None = None
 
         if "title" in data:
+            new_title = _text(data, "title", MAX_TASK_TITLE)
             assignments.append("title = ?")
-            values.append(_text(data, "title", MAX_TASK_TITLE))
+            values.append(new_title)
 
         if "status" in data:
             status = data["status"]
@@ -379,6 +499,10 @@ def register(route) -> None:
         with connection() as conn:
             list_id = _task_list_id(conn, task_id)
             _require(conn, list_id, user["id"], write=True)
+            row = conn.execute(
+                "SELECT title FROM tasks WHERE id = ?", (task_id,)
+            ).fetchone()
+            activity_title = new_title if new_title is not None else (row["title"] if row else "")
             with transaction(conn):
                 values.extend([utcnow(), task_id])
                 conn.execute(
@@ -387,6 +511,15 @@ def register(route) -> None:
                     values,
                 )
                 _touch(conn, list_id)
+                if "status" in data:
+                    action = (
+                        "task.completed"
+                        if data["status"] == "completed"
+                        else "task.reopened"
+                    )
+                else:
+                    action = "task.renamed"
+                _record(conn, list_id, user["id"], action, task_id, activity_title)
             result = _fetch_task(conn, task_id)
             version = _version(conn, list_id)
         return json_response({"task": result, "version": version})
@@ -400,6 +533,10 @@ def register(route) -> None:
         with connection() as conn:
             list_id = _task_list_id(conn, task_id)
             _require(conn, list_id, user["id"], write=True)
+            row = conn.execute(
+                "SELECT title FROM tasks WHERE id = ?", (task_id,)
+            ).fetchone()
+            title = row["title"] if row else ""
             with transaction(conn):
                 # Soft delete, so an accidental tap can be undone.
                 conn.execute(
@@ -407,6 +544,7 @@ def register(route) -> None:
                     (utcnow(), utcnow(), task_id),
                 )
                 _touch(conn, list_id)
+                _record(conn, list_id, user["id"], "task.deleted", task_id, title)
             version = _version(conn, list_id)
         return json_response({"deleted": True, "version": version})
 
@@ -418,7 +556,7 @@ def register(route) -> None:
 
         with connection() as conn:
             row = conn.execute(
-                "SELECT list_id FROM tasks WHERE id = ?", (task_id,)
+                "SELECT list_id, title FROM tasks WHERE id = ?", (task_id,)
             ).fetchone()
             if row is None:
                 raise HTTPError(404, "Task not found")
@@ -430,6 +568,7 @@ def register(route) -> None:
                     (utcnow(), task_id),
                 )
                 _touch(conn, list_id)
+                _record(conn, list_id, user["id"], "task.restored", task_id, row["title"])
             result = _fetch_task(conn, task_id)
             version = _version(conn, list_id)
         return json_response({"task": result, "version": version})
@@ -451,6 +590,9 @@ def register(route) -> None:
 
         with connection() as conn:
             _require(conn, list_id, user["id"], write=True)
+            expected = _if_match(request)
+            if expected is not None and expected != _version(conn, list_id):
+                raise HTTPError(409, "The list changed; reload and try again")
             existing = {
                 row["id"]
                 for row in conn.execute(
@@ -491,5 +633,53 @@ def register(route) -> None:
                     (utcnow(), list_id),
                 )
                 _touch(conn, list_id)
+                _record(conn, list_id, user["id"], "list.reset")
             result = {"version": _version(conn, list_id), "tasks": _tasks(conn, list_id)}
         return json_response(result)
+
+    @route("GET", r"/api/lists/(?P<list_id>\d+)/state")
+    async def get_state(request: Request) -> Response:
+        """Everything the workspace needs, or 304 if nothing changed.
+
+        `since` is the version the caller already has. A 304 carries no body,
+        which is the point: polling a shared list costs one integer comparison
+        and an empty response when nobody has touched it.
+        """
+        user = auth.require_user(request)
+        list_id = int(request.params["list_id"])
+
+        since_raw = request.query.get("since", [""])[0].strip()
+        try:
+            since = int(since_raw) if since_raw else 0
+        except ValueError:
+            since = 0
+
+        client_id = request.header("x-client-id").strip()
+        if not re.fullmatch(r"[A-Za-z0-9_-]{8,64}", client_id):
+            client_id = ""
+
+        with connection() as conn:
+            role = _require(conn, list_id, user["id"])
+            version = _version(conn, list_id)
+            etag = f'W/"{version}"'
+
+            # Touch presence even when returning 304: the caller is still
+            # looking, which is exactly what presence is for.
+            if client_id:
+                presence.touch(
+                    list_id, client_id, user["id"], user["name"] or user["email"]
+                )
+
+            if (since and since == version) or request.header("if-none-match") == etag:
+                return Response(304, headers={"ETag": etag})
+
+            payload = {
+                "version": version,
+                "list": _fetch_list(conn, list_id, user["id"]),
+                "tasks": _tasks(conn, list_id),
+                "members": _members(conn, list_id, include_email=(role == "owner")),
+                "activity": _activity(conn, list_id),
+                "presence": presence.snapshot(list_id),
+                "server_time": utcnow(),
+            }
+        return json_response(payload, headers={"ETag": etag})

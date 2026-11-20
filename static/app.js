@@ -20,10 +20,19 @@ const state = {
   lists: [],
   activeId: null,
   tasks: [],
+  version: 0,
+  activity: [],
+  presence: [],
+  activityOpen: false,
   editing: false,
   // Preserved across re-renders so toggling a task cannot eat a half-typed
   // item in the add field.
   draft: "",
+  clientId: "",
+  inflight: 0,
+  pollTimer: null,
+  pollCount: 0,
+  lastInteraction: Date.now(),
 };
 
 const dom = {
@@ -85,6 +94,27 @@ function toggleTheme() {
 
 // ----------------------------------------------------------------------- api
 
+function makeClientId() {
+  if (window.crypto && crypto.randomUUID) return crypto.randomUUID();
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  return [...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function loadClientId() {
+  try {
+    let id = sessionStorage.getItem("checklist-client-id");
+    if (!id) {
+      id = makeClientId();
+      sessionStorage.setItem("checklist-client-id", id);
+    }
+    return id;
+  } catch (error) {
+    // Storage blocked: presence still works, it just cannot be stable across
+    // reloads within this tab.
+    return makeClientId();
+  }
+}
+
 class ApiError extends Error {
   constructor(message, status) {
     super(message);
@@ -99,11 +129,14 @@ function setOffline(value) {
 }
 
 async function apiFetch(path, options = {}) {
-  const { method = "GET", body } = options;
-  const headers = { Accept: "application/json" };
+  const { method = "GET", body, headers: extraHeaders } = options;
+  const headers = { Accept: "application/json", ...(extraHeaders || {}) };
+  if (state.clientId) headers["X-Client-Id"] = state.clientId;
   if (body !== undefined) headers["Content-Type"] = "application/json";
   if (method !== "GET" && state.csrf) headers["X-CSRF-Token"] = state.csrf;
 
+  const mutating = method !== "GET";
+  if (mutating) state.inflight += 1;
   try {
     const response = await fetch(path, {
       method,
@@ -118,6 +151,8 @@ async function apiFetch(path, options = {}) {
   } catch (error) {
     setOffline(true);
     return null;
+  } finally {
+    if (mutating) state.inflight -= 1;
   }
 }
 
@@ -126,6 +161,7 @@ async function apiJson(path, options = {}) {
   if (!response) {
     throw new ApiError("You are offline. Reconnect and try again.", 0);
   }
+  if (response.status === 304) return null;
 
   const text = await response.text();
   let data = null;
@@ -139,6 +175,7 @@ async function apiJson(path, options = {}) {
 
   if (!response.ok) {
     if (response.status === 401) {
+      stopPolling();
       state.user = null;
       state.lists = [];
       render();
@@ -275,6 +312,8 @@ function renderWorkspace() {
   }
 
   renderTasks(section);
+  renderPresence(section);
+  renderActivity(section, list);
   dom.main.replaceChildren(fragment);
 }
 
@@ -328,6 +367,86 @@ function relativeTime(iso) {
   return new Date(then).toLocaleDateString();
 }
 
+function renderPresence(section) {
+  const node = section.querySelector('[data-slot="presence"]');
+  if (!state.user) {
+    node.hidden = true;
+    return;
+  }
+  const names = [
+    ...new Set(
+      (state.presence || [])
+        .filter((entry) => entry.user_id !== state.user.id)
+        .map((entry) => entry.name)
+        .filter(Boolean)
+    ),
+  ];
+  node.hidden = names.length === 0;
+  node.textContent = names.length ? `Also here: ${names.join(", ")}` : "";
+}
+
+function activityText(entry) {
+  const who = entry.user_name || "Someone";
+  const subject = entry.detail ? `“${entry.detail}”` : "an item";
+  switch (entry.action) {
+    case "list.created":
+      return `${who} created the list`;
+    case "list.renamed":
+      return `${who} renamed the list to “${entry.detail}”`;
+    case "list.settings":
+      return `${who} changed the reset setting`;
+    case "list.reset":
+      return `${who} reset the list`;
+    case "task.added":
+      return `${who} added ${subject}`;
+    case "task.completed":
+      return `${who} completed ${subject}`;
+    case "task.reopened":
+      return `${who} reopened ${subject}`;
+    case "task.deleted":
+      return `${who} deleted ${subject}`;
+    case "task.restored":
+      return `${who} restored ${subject}`;
+    case "task.renamed":
+      return `${who} renamed ${subject}`;
+    default:
+      return `${who} made a change`;
+  }
+}
+
+function renderActivity(section, list) {
+  const details = section.querySelector('[data-slot="activity"]');
+  const entries = state.activity || [];
+  // Solo lists have no one else to report on, and no polling to keep the feed
+  // current, so the panel is shown only where it means something.
+  if (list.member_count <= 1 || entries.length === 0) {
+    details.hidden = true;
+    return;
+  }
+
+  details.hidden = false;
+  details.open = state.activityOpen;
+  details.addEventListener("toggle", () => {
+    state.activityOpen = details.open;
+  });
+
+  const target = details.querySelector('[data-slot="activity-list"]');
+  for (const entry of entries) {
+    const item = document.createElement("li");
+    item.className = "activity-item";
+
+    const text = document.createElement("span");
+    text.textContent = activityText(entry);
+
+    const time = document.createElement("time");
+    time.dateTime = entry.created_at || "";
+    time.textContent = relativeTime(entry.created_at);
+
+    item.append(text, time);
+    target.append(item);
+  }
+}
+
 // -------------------------------------------------------------------- toasts
 
 function toast(message, options = {}) {
@@ -363,9 +482,109 @@ async function refreshLists() {
   state.lists = data.lists;
 }
 
-async function loadTasks() {
-  const data = await apiJson(`/api/lists/${state.activeId}/tasks`);
+const POLL_ACTIVE_MS = 4000;
+const POLL_IDLE_MS = 20000;
+const POLL_FULL_EVERY = 5;
+const IDLE_AFTER_MS = 120000;
+
+function applyState(data, { render: shouldRender = true } = {}) {
+  state.version = data.version;
   state.tasks = data.tasks;
+  state.activity = data.activity || [];
+  state.presence = data.presence || [];
+
+  const index = state.lists.findIndex((entry) => entry.id === data.list.id);
+  if (index === -1) state.lists.push(data.list);
+  else state.lists[index] = data.list;
+
+  if (!shouldRender) return;
+
+  // Re-rendering must not steal focus from a checkbox or the add field.
+  const active = document.activeElement;
+  const taskId =
+    active && active.closest && active.closest(".task")
+      ? Number(active.closest(".task").dataset.taskId)
+      : null;
+  const addFocused = Boolean(active && active.id === "new-task");
+
+  render();
+  if (taskId !== null) focusTask(taskId);
+  if (addFocused) focusAdd();
+}
+
+async function loadState() {
+  const data = await apiJson(`/api/lists/${state.activeId}/state`);
+  if (data) applyState(data, { render: false });
+  return data;
+}
+
+function stopPolling() {
+  if (state.pollTimer !== null) {
+    clearTimeout(state.pollTimer);
+    state.pollTimer = null;
+  }
+}
+
+function shouldPoll() {
+  const list = currentList();
+  return Boolean(
+    state.user &&
+      state.activeId !== null &&
+      list &&
+      list.member_count > 1 &&
+      document.visibilityState === "visible"
+  );
+}
+
+function schedulePoll() {
+  stopPolling();
+  if (!shouldPoll()) return;
+  const idle = Date.now() - state.lastInteraction > IDLE_AFTER_MS;
+  state.pollTimer = window.setTimeout(poll, idle ? POLL_IDLE_MS : POLL_ACTIVE_MS);
+}
+
+function nudgePoll() {
+  if (!shouldPoll()) return;
+  stopPolling();
+  state.pollTimer = window.setTimeout(poll, 800);
+}
+
+async function poll() {
+  state.pollTimer = null;
+  if (!shouldPoll()) return;
+  if (state.inflight > 0) {
+    schedulePoll();
+    return;
+  }
+
+  // A conditional request costs one integer comparison and no body. Every
+  // fifth poll drops the condition so presence and activity refresh even when
+  // the list itself has not changed.
+  const full = state.pollCount % POLL_FULL_EVERY === 0 || !state.version;
+  state.pollCount += 1;
+  const suffix = full ? "" : `?since=${state.version}`;
+
+  try {
+    const data = await apiJson(`/api/lists/${state.activeId}/state${suffix}`);
+    if (data) applyState(data);
+  } catch (error) {
+    if (error.status === 404) {
+      toast("That list is no longer available.");
+      state.activeId = null;
+      await showOverview({ push: false });
+      return;
+    }
+    // Anything else is transient; the offline banner already explains it.
+  }
+  schedulePoll();
+}
+
+function afterMutation(data) {
+  if (data && Number.isInteger(data.version)) state.version = data.version;
+  // Force the next poll to fetch everything, so activity and counts catch up
+  // even though this client already knows the new version.
+  state.pollCount = 0;
+  nudgePoll();
 }
 
 function sortTasks() {
@@ -389,9 +608,14 @@ async function openList(id, { push = true } = {}) {
   state.activeId = id;
   state.editing = false;
   state.draft = "";
+  state.activity = [];
+  state.presence = [];
+  state.activityOpen = false;
+  state.pollCount = 0;
+  state.lastInteraction = Date.now();
 
   try {
-    await loadTasks();
+    await loadState();
   } catch (error) {
     state.activeId = null;
     toast(error.message);
@@ -401,13 +625,17 @@ async function openList(id, { push = true } = {}) {
     }
   }
   render();
+  schedulePoll();
 }
 
 async function showOverview({ push = true } = {}) {
+  stopPolling();
   if (push) history.pushState(null, "", location.pathname);
   state.activeId = null;
   state.editing = false;
   state.tasks = [];
+  state.activity = [];
+  state.presence = [];
   state.draft = "";
 
   if (state.user) {
@@ -434,6 +662,7 @@ async function addTask(form) {
     sortTasks();
     state.draft = "";
     syncCounts();
+    afterMutation(data);
     render();
     focusAdd();
   } catch (error) {
@@ -466,6 +695,7 @@ async function toggleTask(taskId) {
       body: { status: next },
     });
     Object.assign(task, data.task);
+    afterMutation(data);
   } catch (error) {
     Object.assign(task, previous);
     toast(error.message);
@@ -484,7 +714,8 @@ async function deleteTask(taskId) {
   render();
 
   try {
-    await apiJson(`/api/tasks/${taskId}`, { method: "DELETE" });
+    const data = await apiJson(`/api/tasks/${taskId}`, { method: "DELETE" });
+    afterMutation(data);
     toast("Item deleted", { actionLabel: "Undo", onAction: () => restoreTask(taskId) });
   } catch (error) {
     state.tasks.splice(index, 0, task);
@@ -500,6 +731,7 @@ async function restoreTask(taskId) {
     state.tasks.push(data.task);
     sortTasks();
     syncCounts();
+    afterMutation(data);
     render();
     toast("Item restored");
   } catch (error) {
@@ -522,14 +754,20 @@ async function moveTask(taskId, direction) {
   render();
 
   try {
-    await apiJson(`/api/lists/${state.activeId}/reorder`, {
+    const data = await apiJson(`/api/lists/${state.activeId}/reorder`, {
       method: "POST",
       body: { task_ids: state.tasks.map((task) => task.id) },
+      headers: { "If-Match": String(state.version) },
     });
+    afterMutation(data);
   } catch (error) {
-    toast(error.message);
+    if (error.status === 409) {
+      toast("Someone changed this list — refreshed.");
+    } else {
+      toast(error.message);
+    }
     try {
-      await loadTasks();
+      await loadState();
     } catch (reloadError) {
       /* the toast already explains the problem */
     }
@@ -552,6 +790,7 @@ async function resetList() {
     const data = await apiJson(`/api/lists/${list.id}/reset`, { method: "POST" });
     state.tasks = data.tasks;
     syncCounts();
+    afterMutation(data);
     render();
     toast("List reset");
   } catch (error) {
@@ -726,14 +965,33 @@ function wireEvents() {
     setOffline(false);
     if (!state.user) return;
     try {
-      if (state.activeId !== null) await loadTasks();
+      if (state.activeId !== null) await loadState();
       else await refreshLists();
       render();
+      schedulePoll();
     } catch (error) {
       toast(error.message);
     }
   });
   window.addEventListener("offline", () => setOffline(true));
+
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") {
+      state.lastInteraction = Date.now();
+      schedulePoll();
+    } else {
+      stopPolling();
+    }
+  });
+
+  // Any interaction resets the idle backoff, so an actively used list polls
+  // quickly while one left open in the background slows down.
+  dom.main.addEventListener("pointerdown", () => {
+    state.lastInteraction = Date.now();
+  });
+  dom.main.addEventListener("keydown", () => {
+    state.lastInteraction = Date.now();
+  });
 
   window.addEventListener("popstate", () => {
     const wanted = routeFromHash();
@@ -777,6 +1035,7 @@ async function loadMe() {
 }
 
 async function boot() {
+  state.clientId = loadClientId();
   applyStoredTheme();
   // Enable the colour transition only once the stored theme is in place.
   requestAnimationFrame(() => document.body.classList.add("theme-ready"));
