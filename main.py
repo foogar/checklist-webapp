@@ -186,8 +186,7 @@ async def manifest(request: Request) -> Response:
             "start_url": "/",
             "scope": "/",
             "display": "standalone",
-            "orientation": "portrait-primary",
-            "background_color": "#111827",
+            "background_color": "#f8fafc",
             "theme_color": "#2563eb",
             "icons": [
                 {
@@ -204,7 +203,10 @@ async def manifest(request: Request) -> Response:
                 },
             ],
         },
-        headers={"Cache-Control": "no-cache"},
+        headers={
+            "Content-Type": "application/manifest+json",
+            "Cache-Control": "no-cache",
+        },
     )
 
 

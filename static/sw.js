@@ -15,7 +15,7 @@
  * the cached shell, so the new URLs are picked up on their own.
  */
 
-const VERSION = "v2";
+const VERSION = "v3";
 const CACHE = `checklist-${VERSION}`;
 
 // Fetched at install. The shell's own <link> and <script> URLs are discovered
@@ -88,7 +88,15 @@ self.addEventListener("fetch", (event) => {
     return;
   }
 
-  if (url.pathname.startsWith("/static/") || url.pathname === "/manifest.json") {
+  // The manifest lives at a fixed URL and changes when the app is deployed, so
+  // a cache-first rule would keep serving an old copy. Revalidate it, and fall
+  // back to the cached copy only when the network is unavailable.
+  if (url.pathname === "/manifest.json") {
+    event.respondWith(networkFirstAsset(request));
+    return;
+  }
+
+  if (url.pathname.startsWith("/static/")) {
     event.respondWith(cacheFirst(request));
   }
 });
@@ -133,4 +141,22 @@ async function cacheFirst(request) {
     cache.put(request, response.clone());
   }
   return response;
+}
+
+async function networkFirstAsset(request) {
+  const cache = await caches.open(CACHE);
+  try {
+    const response = await fetch(request);
+    // A proxy error is not a usable manifest, so keep the last good copy.
+    if (response && response.status < 500) {
+      cache.put(request, response.clone());
+      return response;
+    }
+  } catch (error) {
+    /* fall through to the cache */
+  }
+
+  const cached = await cache.match(request);
+  if (cached) return cached;
+  return fetch(request);
 }

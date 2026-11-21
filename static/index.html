@@ -229,7 +229,7 @@
       <p class="presence" data-slot="presence" hidden></p>
 
       <p class="hint" data-slot="edit-hint" hidden>
-        Reordering and delete controls are visible while editing.
+        Reordering, delete, and list settings are available while editing.
       </p>
 
       <form class="add-form" data-action="add-task">
@@ -243,13 +243,15 @@
         <input id="task-filter" type="search" placeholder="Filter items…" autocomplete="off">
       </form>
 
-      <ul class="tasks" data-slot="pending"></ul>
-      <p class="empty" data-slot="no-pending" hidden>Nothing left. Add an item above.</p>
+      <div class="task-card" data-slot="task-card">
+        <ul class="tasks" data-slot="pending"></ul>
 
-      <section class="completed" data-slot="completed" hidden>
-        <h2 class="completed-title">Completed</h2>
-        <ul class="tasks tasks-done" data-slot="completed-list"></ul>
-      </section>
+        <section class="completed" data-slot="completed" hidden>
+          <h2 class="completed-title">Completed</h2>
+          <ul class="tasks tasks-done" data-slot="completed-list"></ul>
+        </section>
+      </div>
+      <p class="empty" data-slot="no-pending" hidden>Nothing left. Add an item above.</p>
 
       <details class="activity" data-slot="activity" hidden>
         <summary>Recent activity</summary>

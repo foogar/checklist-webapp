@@ -459,10 +459,13 @@ function renderWorkspace() {
   resetButton.hidden = !(list.role === "owner" && list.is_resettable);
 
   const deleteButton = section.querySelector('[data-action="delete-list"]');
-  deleteButton.hidden = list.role !== "owner";
+  deleteButton.hidden = list.role !== "owner" || !state.editing;
 
   section.querySelector('[data-action="share"]').hidden = list.role !== "owner";
-  section.querySelector('[data-action="settings"]').hidden = list.role !== "owner";
+  // Destructive and structural actions live behind Edit, so the normal view
+  // stays about using the list rather than managing it.
+  section.querySelector('[data-action="settings"]').hidden =
+    list.role !== "owner" || !state.editing;
 
   const form = section.querySelector('[data-action="add-task"]');
   if (list.role === "viewer") {
@@ -509,6 +512,11 @@ function renderTasks(section) {
   completedSection.hidden = completed.length === 0;
   const completedList = section.querySelector('[data-slot="completed-list"]');
   for (const task of completed) completedList.append(buildTask(task, false));
+
+  // With nothing to show, hide the empty card and let the message below it
+  // carry the space instead of leaving a bordered blank box.
+  section.querySelector('[data-slot="task-card"]').hidden =
+    pending.length === 0 && completed.length === 0;
 }
 
 function buildTask(task, isPending) {
@@ -1494,15 +1502,11 @@ function wireEvents() {
     window.beforeInstallPrompt = null;
     dom.installButton.hidden = true;
     try {
-      const result = await event.prompt();
-      if (
-        result &&
-        result.userChoice &&
-        result.userChoice.outcome === "accepted"
-      ) {
-        toast("App installed!");
-      } else {
-        toast("Install declined — you can still add it from your browser menu.");
+      // prompt() resolves to { outcome, platform }; userChoice is a separate
+      // promise on the event, not a property of this result.
+      const choice = await event.prompt();
+      if (!choice || choice.outcome !== "accepted") {
+        toast("You can install later from the browser menu.");
       }
     } catch (error) {
       toast("Install isn’t available right now.");
@@ -1513,6 +1517,12 @@ function wireEvents() {
     event.preventDefault();
     window.beforeInstallPrompt = event;
     dom.installButton.hidden = false;
+  });
+
+  window.addEventListener("appinstalled", () => {
+    window.beforeInstallPrompt = null;
+    dom.installButton.hidden = true;
+    toast("App installed!");
   });
 
   dom.newListForm.addEventListener("submit", (event) => {

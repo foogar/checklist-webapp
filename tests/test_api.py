@@ -123,11 +123,17 @@ class ShellTests(unittest.TestCase):
     def test_manifest_is_installable(self):
         response = self.client.get("/manifest.json")
         self.assertEqual(response.status, 200)
+        self.assertTrue(
+            response.headers["content-type"].startswith("application/manifest+json")
+        )
         manifest = response.json()
         self.assertEqual(manifest["start_url"], "/")
+        self.assertEqual(manifest["scope"], "/")
         self.assertEqual(manifest["display"], "standalone")
         sizes = {icon["sizes"] for icon in manifest["icons"]}
         self.assertEqual(sizes, {"192x192", "512x512"})
+        for icon in manifest["icons"]:
+            self.assertIn("any", icon["purpose"])
 
     def test_service_worker_is_served_from_root(self):
         response = self.client.get("/sw.js")
