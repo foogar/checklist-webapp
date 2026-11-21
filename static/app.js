@@ -48,6 +48,7 @@ const dom = {
   authSlot: document.getElementById("auth-slot"),
   themeToggle: document.getElementById("theme-toggle"),
   brand: document.getElementById("brand"),
+  installButton: document.getElementById("install-button"),
   offlineBanner: document.getElementById("offline-banner"),
   toasts: document.getElementById("toasts"),
   newListDialog: document.getElementById("dlg-new-list"),
@@ -1487,6 +1488,32 @@ function focusAdd() {
 function wireEvents() {
   dom.themeToggle.addEventListener("click", toggleTheme);
   dom.brand.addEventListener("click", () => showOverview());
+  dom.installButton.addEventListener("click", async () => {
+    const event = window.beforeInstallPrompt;
+    if (!event) return;
+    window.beforeInstallPrompt = null;
+    dom.installButton.hidden = true;
+    try {
+      const result = await event.prompt();
+      if (
+        result &&
+        result.userChoice &&
+        result.userChoice.outcome === "accepted"
+      ) {
+        toast("App installed!");
+      } else {
+        toast("Install declined — you can still add it from your browser menu.");
+      }
+    } catch (error) {
+      toast("Install isn’t available right now.");
+    }
+  });
+
+  window.addEventListener("beforeinstallprompt", (event) => {
+    event.preventDefault();
+    window.beforeInstallPrompt = event;
+    dom.installButton.hidden = false;
+  });
 
   dom.newListForm.addEventListener("submit", (event) => {
     event.preventDefault();
