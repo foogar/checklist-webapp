@@ -38,6 +38,8 @@ const state = {
   inflight: 0,
   queue: [],
   flushing: false,
+  deleted: [],
+  undoTimer: null,
   pollTimer: null,
   pollCount: 0,
   lastInteraction: Date.now(),
@@ -467,6 +469,10 @@ function renderWorkspace() {
   section.querySelector('[data-action="settings"]').hidden =
     list.role !== "owner" || !state.editing;
 
+  const exportLink = section.querySelector('[data-action="export"]');
+  exportLink.hidden = !state.editing;
+  exportLink.href = `/api/lists/${list.id}/export`;
+
   const form = section.querySelector('[data-action="add-task"]');
   if (list.role === "viewer") {
     form.hidden = true;
@@ -480,9 +486,19 @@ function renderWorkspace() {
   section.querySelector("#task-filter").value = state.filter;
 
   renderTasks(section);
+  renderUndoBar(section);
   renderPresence(section);
   renderActivity(section, list);
   dom.main.replaceChildren(fragment);
+}
+
+function renderUndoBar(section) {
+  const bar = section.querySelector('[data-slot="undo-bar"]');
+  const count = state.deleted.length;
+  bar.hidden = count === 0;
+  if (count === 0) return;
+  bar.querySelector('[data-field="undo-text"]').textContent =
+    count === 1 ? "1 item deleted" : `${count} items deleted`;
 }
 
 function renderTasks(section) {
@@ -682,6 +698,11 @@ function toast(message, options = {}) {
   if (duration > 0) {
     window.setTimeout(() => element.remove(), duration);
   }
+
+  // A tall pile of toasts covers the list underneath, so keep the stack short.
+  while (dom.toasts.children.length > 3) {
+    dom.toasts.firstElementChild.remove();
+  }
 }
 
 // ------------------------------------------------------------------- actions
@@ -831,6 +852,7 @@ async function openList(id, { push = true } = {}) {
   state.activityOpen = false;
   state.pollCount = 0;
   state.lastInteraction = Date.now();
+  clearDeleted();
 
   try {
     await loadState();
@@ -856,6 +878,7 @@ async function showOverview({ push = true } = {}) {
   state.activity = [];
   state.presence = [];
   state.draft = "";
+  clearDeleted();
 
   if (state.user) {
     try {
@@ -955,10 +978,41 @@ async function toggleTask(taskId) {
   focusTask(taskId);
 }
 
+const UNDO_WINDOW_MS = 15000;
+
+function clearDeleted() {
+  state.deleted = [];
+  if (state.undoTimer !== null) {
+    window.clearTimeout(state.undoTimer);
+    state.undoTimer = null;
+  }
+}
+
+function hideUndoBar() {
+  const bar = document.querySelector('[data-slot="undo-bar"]');
+  if (bar) bar.hidden = true;
+}
+
+function rememberDeleted(task) {
+  state.deleted.push(task);
+  if (state.undoTimer !== null) window.clearTimeout(state.undoTimer);
+  // Restart the clock for every delete, so a quick series stays undoable as
+  // one batch instead of stacking a toast per item.
+  state.undoTimer = window.setTimeout(() => {
+    state.undoTimer = null;
+    state.deleted = [];
+    // Hide in place rather than re-rendering: a re-render would take focus
+    // away from the add field if someone started typing in the meantime.
+    hideUndoBar();
+  }, UNDO_WINDOW_MS);
+  render();
+}
+
 async function deleteTask(taskId) {
   const index = state.tasks.findIndex((item) => item.id === taskId);
   if (index === -1) return;
 
+  const listId = state.activeId;
   const [task] = state.tasks.splice(index, 1);
   syncCounts();
   render();
@@ -966,11 +1020,13 @@ async function deleteTask(taskId) {
   try {
     const data = await apiJson(`/api/tasks/${taskId}`, { method: "DELETE" });
     afterMutation(data);
-    toast("Item deleted", { actionLabel: "Undo", onAction: () => restoreTask(task) });
+    // Navigating away while the request was in flight: the undo bar belongs to
+    // the list that owned the item, not whichever list is open now.
+    if (state.activeId === listId) rememberDeleted(task);
   } catch (error) {
     if (isOffline(error)) {
       enqueue("DELETE", `/api/tasks/${taskId}`);
-      toast("Item deleted", { actionLabel: "Undo", onAction: () => restoreTask(task) });
+      if (state.activeId === listId) rememberDeleted(task);
     } else {
       state.tasks.splice(index, 0, task);
       syncCounts();
@@ -980,7 +1036,24 @@ async function deleteTask(taskId) {
   }
 }
 
-async function restoreTask(task) {
+async function undoDeletes() {
+  const tasks = state.deleted.slice().reverse();
+  clearDeleted();
+  hideUndoBar();
+
+  let restored = 0;
+  for (const task of tasks) {
+    if (await restoreTask(task, { silent: true })) restored += 1;
+  }
+
+  if (restored > 0) {
+    toast(restored === 1 ? "Item restored" : `${restored} items restored`);
+  } else {
+    toast("Those items could not be restored.");
+  }
+}
+
+async function restoreTask(task, { silent = false } = {}) {
   const taskId = typeof task === "number" ? task : task.id;
   try {
     const data = await apiJson(`/api/tasks/${taskId}/restore`, { method: "POST" });
@@ -989,7 +1062,8 @@ async function restoreTask(task) {
     syncCounts();
     afterMutation(data);
     render();
-    toast("Item restored");
+    if (!silent) toast("Item restored");
+    return true;
   } catch (error) {
     if (isOffline(error)) {
       if (typeof task !== "number") {
@@ -999,10 +1073,13 @@ async function restoreTask(task) {
         render();
       }
       enqueue("POST", `/api/tasks/${taskId}/restore`);
-      toast("Restored on this device. It will be sent when you reconnect.");
-    } else {
-      toast(error.message);
+      if (!silent) {
+        toast("Restored on this device. It will be sent when you reconnect.");
+      }
+      return true;
     }
+    if (!silent) toast(error.message);
+    return false;
   }
 }
 
@@ -1389,7 +1466,6 @@ function openSettings() {
     : "04:00";
   updateResetTimeVisibility();
 
-  form.querySelector('[data-slot="export"]').href = `/api/lists/${list.id}/export`;
   dom.settingsDialog.showModal();
 }
 
@@ -1585,6 +1661,13 @@ function wireEvents() {
         break;
       case "delete-task":
         await deleteTask(taskIdOf(target));
+        break;
+      case "undo-delete":
+        await undoDeletes();
+        break;
+      case "dismiss-undo":
+        clearDeleted();
+        hideUndoBar();
         break;
       default:
         break;

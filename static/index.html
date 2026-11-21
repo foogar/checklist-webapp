@@ -150,8 +150,6 @@
         <input type="time" name="reset_time" value="04:00">
       </label>
       <div class="dialog-actions">
-        <a class="button" data-slot="export" href="#">Export JSON</a>
-        <span class="dialog-spacer"></span>
         <button type="button" class="button" data-action="close-dialog">Cancel</button>
         <button type="submit" class="button button-primary">Save</button>
       </div>
@@ -185,7 +183,7 @@
       <div class="section-head">
         <h1 class="section-title">Your checklists</h1>
         <div class="section-actions">
-          <button type="button" class="button button-ghost" data-action="import">Import</button>
+          <button type="button" class="button button-ghost" data-action="import">Import List</button>
           <button type="button" class="button button-primary" data-action="new-list">New list</button>
         </div>
       </div>
@@ -221,6 +219,7 @@
           <button type="button" class="button button-ghost" data-action="toggle-edit" aria-pressed="false">Edit</button>
           <button type="button" class="button button-ghost" data-action="share" hidden>Share</button>
           <button type="button" class="button button-ghost" data-action="settings" hidden>Settings</button>
+          <a class="button button-ghost" data-action="export" href="#" hidden>Export List</a>
           <button type="button" class="button button-warn" data-action="reset" hidden>Reset</button>
           <button type="button" class="link-button danger" data-action="delete-list" hidden>Delete</button>
         </div>
@@ -229,7 +228,7 @@
       <p class="presence" data-slot="presence" hidden></p>
 
       <p class="hint" data-slot="edit-hint" hidden>
-        Reordering, delete, and list settings are available while editing.
+        Reordering, export, delete, and list settings are available while editing.
       </p>
 
       <form class="add-form" data-action="add-task">
@@ -242,6 +241,12 @@
         <label class="visually-hidden" for="task-filter">Filter items</label>
         <input id="task-filter" type="search" placeholder="Filter items…" autocomplete="off">
       </form>
+
+      <div class="undo-bar" data-slot="undo-bar" hidden>
+        <span data-field="undo-text" role="status"></span>
+        <button type="button" class="link-button" data-action="undo-delete">Undo</button>
+        <button type="button" class="icon-small" data-action="dismiss-undo" aria-label="Dismiss">×</button>
+      </div>
 
       <div class="task-card" data-slot="task-card">
         <ul class="tasks" data-slot="pending"></ul>

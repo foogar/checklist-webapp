@@ -120,6 +120,13 @@ class ShellTests(unittest.TestCase):
         self.assertRegex(body, r"/static/app\.css\?v=[0-9a-f]+")
         self.assertRegex(body, r"/static/app\.js\?v=[0-9a-f]+")
 
+    def test_management_actions_are_labelled(self):
+        body = self.client.get("/").text
+        self.assertIn(">Export List</a>", body)
+        self.assertIn(">Import List</button>", body)
+        # Export moved out of the settings dialog, so its old label is gone.
+        self.assertNotIn("Export JSON", body)
+
     def test_manifest_is_installable(self):
         response = self.client.get("/manifest.json")
         self.assertEqual(response.status, 200)
