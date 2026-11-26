@@ -29,6 +29,9 @@ const state = {
   newInviteUrl: "",
   activityOpen: false,
   editing: false,
+  selecting: false,
+  selected: new Set(),
+  categoryTargets: [],
   filter: "",
   dragId: null,
   // Preserved across re-renders so toggling a task cannot eat a half-typed
@@ -60,6 +63,9 @@ const dom = {
   settingsDialog: document.getElementById("dlg-settings"),
   inviteForm: document.getElementById("form-invite"),
   settingsForm: document.getElementById("form-settings"),
+  categoryDialog: document.getElementById("dlg-category"),
+  categoryForm: document.getElementById("form-category"),
+  categoryOptions: document.getElementById("category-options"),
   importFile: document.getElementById("import-file"),
 };
 
@@ -285,6 +291,7 @@ async function flushQueue() {
 
   let touchedList = null;
   let sent = 0;
+  let conflicted = false;
 
   while (state.queue.length > 0) {
     const op = state.queue[0];
@@ -306,6 +313,7 @@ async function flushQueue() {
       // The list moved on. Applying a stale order would undo someone's work.
       state.queue.shift();
       saveQueue();
+      conflicted = true;
       touchedList = op.listId || touchedList;
       continue;
     }
@@ -336,12 +344,20 @@ async function flushQueue() {
   state.flushing = false;
   updateOfflineBanner();
 
-  if (sent > 0 && state.queue.length === 0 && touchedList !== null) {
+  if (
+    state.queue.length === 0 &&
+    (sent > 0 || conflicted) &&
+    touchedList !== null
+  ) {
     try {
       await refreshLists();
       if (state.activeId !== null) await loadState();
       render();
-      toast("All saved changes are in.");
+      toast(
+        conflicted
+          ? "A saved change conflicted with a newer version — refreshed."
+          : "All saved changes are in."
+      );
     } catch (error) {
       // The banner still reflects anything left in the queue.
     }
@@ -445,38 +461,54 @@ function renderWorkspace() {
     return;
   }
 
+  if (list.role === "viewer" || !state.editing) {
+    state.selecting = false;
+    state.selected.clear();
+  }
+
   const fragment = clone(templates.workspace);
   const section = fragment.querySelector(".workspace");
   fill(section, "title", list.title);
   fill(section, "sub", subtitleFor(list));
   section.classList.toggle("editing", state.editing);
+  section.classList.toggle("selecting", state.selecting);
 
   const editButton = section.querySelector('[data-action="toggle-edit"]');
   editButton.textContent = state.editing ? "Done" : "Edit";
   editButton.setAttribute("aria-pressed", String(state.editing));
+  editButton.hidden = list.role === "viewer";
 
-  section.querySelector('[data-slot="edit-hint"]').hidden = !state.editing;
+  // Management actions step aside while selecting, so the only destructive
+  // button on screen belongs to the selection.
+  const manage = state.editing && !state.selecting;
+  const selectButton = section.querySelector('[data-action="select-items"]');
+  selectButton.hidden =
+    list.role === "viewer" || !state.editing || state.selecting;
+
+  const hint = section.querySelector('[data-slot="edit-hint"]');
+  hint.hidden = !state.editing;
+  hint.textContent = state.selecting
+    ? "Select items to change them together."
+    : "Reordering, export, delete, and list settings are available while editing.";
 
   const resetButton = section.querySelector('[data-action="reset"]');
-  resetButton.hidden = !(list.role === "owner" && list.is_resettable);
+  resetButton.hidden =
+    !(list.role === "owner" && list.is_resettable) || state.selecting;
 
   const deleteButton = section.querySelector('[data-action="delete-list"]');
-  deleteButton.hidden = list.role !== "owner" || !state.editing;
+  deleteButton.hidden = list.role !== "owner" || !manage;
 
   section.querySelector('[data-action="share"]').hidden = list.role !== "owner";
-  // Destructive and structural actions live behind Edit, so the normal view
-  // stays about using the list rather than managing it.
   section.querySelector('[data-action="settings"]').hidden =
-    list.role !== "owner" || !state.editing;
+    list.role !== "owner" || !manage;
 
   const exportLink = section.querySelector('[data-action="export"]');
-  exportLink.hidden = !state.editing;
+  exportLink.hidden = !manage;
   exportLink.href = `/api/lists/${list.id}/export`;
 
   const form = section.querySelector('[data-action="add-task"]');
-  if (list.role === "viewer") {
+  if (list.role === "viewer" || state.selecting) {
     form.hidden = true;
-    editButton.hidden = true;
   } else {
     form.elements.title.value = state.draft;
   }
@@ -486,10 +518,68 @@ function renderWorkspace() {
   section.querySelector("#task-filter").value = state.filter;
 
   renderTasks(section);
+  renderBulkBar(section);
   renderUndoBar(section);
   renderPresence(section);
   renderActivity(section, list);
   dom.main.replaceChildren(fragment);
+}
+
+function fillBulkBar(bar) {
+  const count = state.selected.size;
+  bar.querySelector('[data-field="bulk-count"]').textContent =
+    count === 1 ? "1 selected" : `${count} selected`;
+
+  const selectedTasks = state.tasks.filter((task) => state.selected.has(task.id));
+  const hasPending = selectedTasks.some((task) => task.status === "pending");
+  const hasCompleted = selectedTasks.some((task) => task.status === "completed");
+
+  bar.querySelector('[data-action="bulk-category"]').disabled = count === 0;
+  bar.querySelector('[data-action="bulk-complete"]').disabled = !hasPending;
+  bar.querySelector('[data-action="bulk-reopen"]').disabled = !hasCompleted;
+  bar.querySelector('[data-action="bulk-delete"]').disabled = count === 0;
+}
+
+function renderBulkBar(section) {
+  const bar = section.querySelector('[data-slot="bulk-bar"]');
+  bar.hidden = !state.selecting;
+  if (state.selecting) fillBulkBar(bar);
+}
+
+function enterSelection() {
+  const list = currentList();
+  if (!state.editing || !list || list.role === "viewer") return;
+  state.selecting = true;
+  state.selected.clear();
+  render();
+}
+
+function exitSelection({ render: shouldRender = true } = {}) {
+  state.selecting = false;
+  state.selected.clear();
+  if (shouldRender) render();
+}
+
+function clearSelection() {
+  state.selected.clear();
+  updateSelectionUI();
+}
+
+function selectAllVisible() {
+  state.selected = new Set(visibleTasks().map((task) => task.id));
+  updateSelectionUI();
+}
+
+function updateSelectionUI() {
+  for (const row of document.querySelectorAll(".task")) {
+    const id = Number(row.dataset.taskId);
+    const on = state.selected.has(id);
+    row.classList.toggle("selected", on);
+    const check = row.querySelector(".task-check");
+    if (check) check.checked = on;
+  }
+  const bar = document.querySelector('[data-slot="bulk-bar"]');
+  if (bar && !bar.hidden) fillBulkBar(bar);
 }
 
 function renderUndoBar(section) {
@@ -501,19 +591,63 @@ function renderUndoBar(section) {
     count === 1 ? "1 item deleted" : `${count} items deleted`;
 }
 
+function matchesFilter(task, needle) {
+  if (!needle) return true;
+  return (
+    task.title.toLowerCase().includes(needle) ||
+    (task.category || "").toLowerCase().includes(needle)
+  );
+}
+
+function visibleTasks() {
+  const needle = state.filter.trim().toLowerCase();
+  return state.tasks.filter((task) => matchesFilter(task, needle));
+}
+
+function groupPendingTasks(pending) {
+  const groups = new Map();
+  for (const task of pending) {
+    // Case-insensitive so "Produce" and "produce" do not become two sections.
+    const key = (task.category || "").toLocaleLowerCase();
+    if (!groups.has(key)) {
+      groups.set(key, { label: task.category || "", items: [] });
+    }
+    groups.get(key).items.push(task);
+  }
+  return [...groups.values()].sort((a, b) => {
+    if (!a.label && b.label) return 1;
+    if (a.label && !b.label) return -1;
+    return a.label.localeCompare(b.label, undefined, { sensitivity: "base" });
+  });
+}
+
 function renderTasks(section) {
   const needle = state.filter.trim().toLowerCase();
-  const matches = (task) => !needle || task.title.toLowerCase().includes(needle);
-
   const pending = state.tasks.filter(
-    (task) => task.status === "pending" && matches(task)
+    (task) => task.status === "pending" && matchesFilter(task, needle)
   );
   const completed = state.tasks.filter(
-    (task) => task.status === "completed" && matches(task)
+    (task) => task.status === "completed" && matchesFilter(task, needle)
   );
 
-  const pendingList = section.querySelector('[data-slot="pending"]');
-  for (const task of pending) pendingList.append(buildTask(task, true));
+  const groupsContainer = section.querySelector('[data-slot="pending-groups"]');
+  groupsContainer.replaceChildren();
+  const showHeaders = pending.some((task) => task.category);
+  for (const group of groupPendingTasks(pending)) {
+    const groupSection = document.createElement("section");
+    groupSection.className = "task-group";
+    if (showHeaders) {
+      const title = document.createElement("h2");
+      title.className = "task-group-title";
+      title.textContent = `${group.label || "Uncategorised"} (${group.items.length})`;
+      groupSection.append(title);
+    }
+    const list = document.createElement("ul");
+    list.className = "tasks";
+    for (const task of group.items) list.append(buildTask(task, true));
+    groupSection.append(list);
+    groupsContainer.append(groupSection);
+  }
 
   const empty = section.querySelector('[data-slot="no-pending"]');
   if (needle && pending.length === 0 && completed.length === 0) {
@@ -527,6 +661,7 @@ function renderTasks(section) {
   const completedSection = section.querySelector('[data-slot="completed"]');
   completedSection.hidden = completed.length === 0;
   const completedList = section.querySelector('[data-slot="completed-list"]');
+  completedList.replaceChildren();
   for (const task of completed) completedList.append(buildTask(task, false));
 
   // With nothing to show, hide the empty card and let the message below it
@@ -540,15 +675,41 @@ function buildTask(task, isPending) {
   const row = fragment.querySelector(".task");
   row.dataset.taskId = String(task.id);
 
-  if (isPending && state.editing) {
+  const list = currentList();
+  const selecting = state.selecting;
+  const canReorder =
+    isPending && state.editing && !selecting && !state.filter.trim();
+
+  if (canReorder) {
     row.draggable = true;
     row.classList.add("draggable");
   }
 
   const check = row.querySelector(".task-check");
-  check.checked = !isPending;
+  if (selecting) {
+    check.checked = state.selected.has(task.id);
+    check.setAttribute("aria-label", `Select ${task.title}`);
+    row.classList.toggle("selected", check.checked);
+  } else {
+    check.checked = !isPending;
+    check.removeAttribute("aria-label");
+  }
 
   fill(fragment, "title", task.title);
+
+  const chip = row.querySelector('[data-action="set-category"]');
+  const editable = Boolean(list && list.role !== "viewer" && state.editing && !selecting);
+  chip.hidden = !editable;
+  if (editable) {
+    chip.textContent = task.category || "Category";
+    chip.classList.toggle("has-category", Boolean(task.category));
+    chip.setAttribute(
+      "aria-label",
+      task.category
+        ? `Category: ${task.category}. Change category`
+        : "Set a category"
+    );
+  }
 
   if (!isPending) {
     const who = task.completed_by_name;
@@ -556,7 +717,13 @@ function buildTask(task, isPending) {
     fill(fragment, "meta", [who, when].filter(Boolean).join(" · "));
   }
 
+  row.querySelector(".task-actions").hidden = selecting;
+
   if (!isPending) {
+    row.querySelector('[data-action="move-up"]').hidden = true;
+    row.querySelector('[data-action="move-down"]').hidden = true;
+  } else if (state.filter.trim()) {
+    // Reordering a filtered subset would move items the user cannot see.
     row.querySelector('[data-action="move-up"]').hidden = true;
     row.querySelector('[data-action="move-down"]').hidden = true;
   }
@@ -597,6 +764,10 @@ function renderPresence(section) {
 function activityText(entry) {
   const who = entry.user_name || "Someone";
   const subject = entry.detail ? `“${entry.detail}”` : "an item";
+  const items = (count) => {
+    const n = Number(count);
+    return Number.isFinite(n) ? `${n} item${n === 1 ? "" : "s"}` : "items";
+  };
   switch (entry.action) {
     case "list.created":
       return `${who} created the list`;
@@ -634,6 +805,16 @@ function activityText(entry) {
       return `${who} restored ${subject}`;
     case "task.renamed":
       return `${who} renamed ${subject}`;
+    case "task.categorized":
+      return `${who} categorised ${subject}`;
+    case "bulk.categorized":
+      return `${who} categorised items as ${entry.detail}`;
+    case "bulk.completed":
+      return `${who} completed ${items(entry.detail)}`;
+    case "bulk.reopened":
+      return `${who} reopened ${items(entry.detail)}`;
+    case "bulk.deleted":
+      return `${who} deleted ${items(entry.detail)}`;
     default:
       return `${who} made a change`;
   }
@@ -725,6 +906,13 @@ function applyState(data, { render: shouldRender = true } = {}) {
   state.members = data.members || [];
   state.inviteLinks = data.invite_links || [];
   state.blocks = data.blocks || [];
+
+  if (state.selecting) {
+    const ids = new Set(state.tasks.map((task) => task.id));
+    for (const id of [...state.selected]) {
+      if (!ids.has(id)) state.selected.delete(id);
+    }
+  }
 
   const index = state.lists.findIndex((entry) => entry.id === data.list.id);
   if (index === -1) state.lists.push(data.list);
@@ -845,6 +1033,8 @@ async function openList(id, { push = true } = {}) {
   if (push) history.pushState(null, "", `#/list/${id}`);
   state.activeId = id;
   state.editing = false;
+  state.selecting = false;
+  state.selected.clear();
   state.draft = "";
   state.filter = "";
   state.activity = [];
@@ -873,6 +1063,8 @@ async function showOverview({ push = true } = {}) {
   if (push) history.pushState(null, "", location.pathname);
   state.activeId = null;
   state.editing = false;
+  state.selecting = false;
+  state.selected.clear();
   state.tasks = [];
   state.filter = "";
   state.activity = [];
@@ -993,8 +1185,9 @@ function hideUndoBar() {
   if (bar) bar.hidden = true;
 }
 
-function rememberDeleted(task) {
-  state.deleted.push(task);
+function rememberDeletedMany(tasks) {
+  if (tasks.length === 0) return;
+  state.deleted.push(...tasks);
   if (state.undoTimer !== null) window.clearTimeout(state.undoTimer);
   // Restart the clock for every delete, so a quick series stays undoable as
   // one batch instead of stacking a toast per item.
@@ -1008,12 +1201,17 @@ function rememberDeleted(task) {
   render();
 }
 
+function rememberDeleted(task) {
+  rememberDeletedMany([task]);
+}
+
 async function deleteTask(taskId) {
   const index = state.tasks.findIndex((item) => item.id === taskId);
   if (index === -1) return;
 
   const listId = state.activeId;
   const [task] = state.tasks.splice(index, 1);
+  state.selected.delete(taskId);
   syncCounts();
   render();
 
@@ -1083,6 +1281,292 @@ async function restoreTask(task, { silent = false } = {}) {
   }
 }
 
+// ------------------------------------------------------- categories and bulk
+
+function categoryNames() {
+  const seen = new Map();
+  for (const task of state.tasks) {
+    if (!task.category) continue;
+    const key = task.category.toLocaleLowerCase();
+    if (!seen.has(key)) seen.set(key, task.category);
+  }
+  return [...seen.values()].sort((a, b) =>
+    a.localeCompare(b, undefined, { sensitivity: "base" })
+  );
+}
+
+function openCategoryDialog(taskIds) {
+  const ids = [...new Set(taskIds)].filter((id) => Number.isInteger(id));
+  const tasks = state.tasks.filter((task) => ids.includes(task.id));
+  if (tasks.length === 0) return;
+
+  state.categoryTargets = tasks.map((task) => task.id);
+  const form = dom.categoryForm;
+  form.reset();
+
+  const values = new Set(tasks.map((task) => task.category || ""));
+  form.elements.category.value = values.size === 1 ? [...values][0] : "";
+
+  dom.categoryDialog.querySelector('[data-field="category-title"]').textContent =
+    tasks.length === 1
+      ? `Set category for “${tasks[0].title}”`
+      : `Set category for ${tasks.length} items`;
+
+  dom.categoryOptions.replaceChildren();
+  for (const name of categoryNames()) {
+    const option = document.createElement("option");
+    option.value = name;
+    dom.categoryOptions.append(option);
+  }
+
+  dom.categoryDialog.showModal();
+  form.elements.category.focus();
+  form.elements.category.select();
+}
+
+function closeCategoryDialog() {
+  state.categoryTargets = [];
+  if (dom.categoryDialog.open) dom.categoryDialog.close();
+}
+
+async function applyCategory(value) {
+  const ids = state.categoryTargets.slice();
+  const category = value.trim().replace(/\s+/g, " ") || null;
+  closeCategoryDialog();
+  if (ids.length === 0) return;
+
+  if (ids.length === 1) await setTaskCategory(ids[0], category);
+  else await bulkCategory(ids, category);
+}
+
+async function setTaskCategory(taskId, category) {
+  const task = state.tasks.find((entry) => entry.id === taskId);
+  if (!task) return;
+
+  const listId = state.activeId;
+  const previous = task.category;
+  task.category = category;
+  render();
+
+  try {
+    const data = await apiJson(`/api/tasks/${taskId}`, {
+      method: "PATCH",
+      body: { category },
+    });
+    if (state.activeId !== listId) return;
+    const current = state.tasks.find((entry) => entry.id === taskId);
+    if (current) Object.assign(current, data.task);
+    afterMutation(data);
+    render();
+    toast(category ? `Moved to ${category}` : "Category removed");
+  } catch (error) {
+    if (isOffline(error)) {
+      enqueue("PATCH", `/api/tasks/${taskId}`, { category });
+      toast("Saved on this device. It will be sent when you reconnect.");
+    } else {
+      const current = state.tasks.find((entry) => entry.id === taskId);
+      if (current) current.category = previous;
+      render();
+      toast(error.message);
+    }
+  }
+}
+
+async function bulkCategory(ids, category) {
+  const listId = state.activeId;
+  const previous = new Map();
+  for (const task of state.tasks) {
+    if (!ids.includes(task.id)) continue;
+    previous.set(task.id, task.category);
+    task.category = category;
+  }
+
+  exitSelection({ render: false });
+  render();
+
+  try {
+    const data = await apiJson(`/api/lists/${listId}/bulk`, {
+      method: "POST",
+      body: { action: "category", task_ids: ids, category },
+    });
+    if (state.activeId !== listId) return;
+    state.tasks = data.tasks;
+    state.version = data.version;
+    state.activity = data.activity || state.activity;
+    syncCounts();
+    afterMutation(data);
+    render();
+    toast(
+      category
+        ? `${ids.length} item${ids.length === 1 ? "" : "s"} moved to ${category}`
+        : `${ids.length} item${ids.length === 1 ? "" : "s"} uncategorised`
+    );
+  } catch (error) {
+    if (isOffline(error)) {
+      enqueue("POST", `/api/lists/${listId}/bulk`, {
+        action: "category",
+        task_ids: ids,
+        category,
+      });
+      toast("Saved on this device. It will be sent when you reconnect.");
+    } else {
+      for (const [id, value] of previous) {
+        const task = state.tasks.find((entry) => entry.id === id);
+        if (task) task.category = value;
+      }
+      render();
+      toast(error.message);
+      try {
+        await loadState();
+        render();
+      } catch (reloadError) {
+        /* the toast already explains the problem */
+      }
+    }
+  }
+}
+
+async function bulkStatus(status) {
+  const listId = state.activeId;
+  const ids = [...state.selected].filter((id) => {
+    const task = state.tasks.find((entry) => entry.id === id);
+    return task && task.status !== status;
+  });
+  if (ids.length === 0) {
+    toast(
+      status === "completed"
+        ? "No pending items selected."
+        : "No completed items selected."
+    );
+    return;
+  }
+
+  const previous = new Map();
+  const now = new Date().toISOString();
+  for (const task of state.tasks) {
+    if (!ids.includes(task.id)) continue;
+    previous.set(task.id, {
+      status: task.status,
+      completed_at: task.completed_at,
+      completed_by: task.completed_by,
+      completed_by_name: task.completed_by_name,
+    });
+    task.status = status;
+    if (status === "completed") {
+      task.completed_at = now;
+      task.completed_by = state.user ? state.user.id : null;
+      task.completed_by_name = state.user ? state.user.name : null;
+    } else {
+      task.completed_at = null;
+      task.completed_by = null;
+      task.completed_by_name = null;
+    }
+  }
+
+  exitSelection({ render: false });
+  sortTasks();
+  syncCounts();
+  render();
+
+  try {
+    const data = await apiJson(`/api/lists/${listId}/bulk`, {
+      method: "POST",
+      body: { action: "status", task_ids: ids, status },
+    });
+    if (state.activeId !== listId) return;
+    state.tasks = data.tasks;
+    state.version = data.version;
+    state.activity = data.activity || state.activity;
+    syncCounts();
+    afterMutation(data);
+    render();
+    toast(
+      status === "completed"
+        ? `${ids.length} item${ids.length === 1 ? "" : "s"} completed`
+        : `${ids.length} item${ids.length === 1 ? "" : "s"} reopened`
+    );
+  } catch (error) {
+    if (isOffline(error)) {
+      enqueue("POST", `/api/lists/${listId}/bulk`, {
+        action: "status",
+        task_ids: ids,
+        status,
+      });
+      toast("Saved on this device. It will be sent when you reconnect.");
+    } else {
+      for (const task of state.tasks) {
+        const value = previous.get(task.id);
+        if (value) Object.assign(task, value);
+      }
+      syncCounts();
+      render();
+      toast(error.message);
+      try {
+        await loadState();
+        render();
+      } catch (reloadError) {
+        /* the toast already explains the problem */
+      }
+    }
+  }
+}
+
+async function bulkDelete() {
+  const listId = state.activeId;
+  const ids = [...state.selected];
+  if (ids.length === 0) return;
+
+  const confirmed = await confirmAction({
+    title: `Delete ${ids.length} item${ids.length === 1 ? "" : "s"}?`,
+    message: "You can undo this for 15 seconds.",
+    confirmLabel: "Delete",
+  });
+  if (!confirmed) return;
+
+  const tasks = state.tasks.filter((task) => ids.includes(task.id));
+  state.tasks = state.tasks.filter((task) => !ids.includes(task.id));
+  exitSelection({ render: false });
+  syncCounts();
+  rememberDeletedMany(tasks);
+
+  try {
+    const data = await apiJson(`/api/lists/${listId}/bulk`, {
+      method: "POST",
+      body: { action: "delete", task_ids: ids },
+    });
+    if (state.activeId !== listId) return;
+    state.tasks = data.tasks;
+    state.version = data.version;
+    state.activity = data.activity || state.activity;
+    syncCounts();
+    afterMutation(data);
+    render();
+    toast(`${ids.length} item${ids.length === 1 ? "" : "s"} deleted`);
+  } catch (error) {
+    if (isOffline(error)) {
+      enqueue("POST", `/api/lists/${listId}/bulk`, {
+        action: "delete",
+        task_ids: ids,
+      });
+      toast("Saved on this device. It will be sent when you reconnect.");
+    } else {
+      state.tasks = [...state.tasks, ...tasks];
+      sortTasks();
+      state.deleted = state.deleted.filter((task) => !ids.includes(task.id));
+      if (state.deleted.length === 0) hideUndoBar();
+      syncCounts();
+      render();
+      toast(error.message);
+      try {
+        await loadState();
+        render();
+      } catch (reloadError) {
+        /* the toast already explains the problem */
+      }
+    }
+  }
+}
+
 async function saveOrder() {
   if (state.activeId === null) return;
 
@@ -1128,11 +1612,35 @@ function applyOrder(pending) {
   render();
 }
 
+function orderedPending() {
+  return groupPendingTasks(
+    state.tasks.filter((task) => task.status === "pending")
+  ).flatMap((group) => group.items);
+}
+
 async function moveTask(taskId, direction) {
-  const pending = state.tasks.filter((task) => task.status === "pending");
+  if (state.filter.trim()) return;
+  const pending = orderedPending();
   const index = pending.findIndex((task) => task.id === taskId);
+  if (index < 0) return;
+
+  // Moves stay inside a category, so the section a row lives in never changes
+  // because of a reorder.
+  const key = (pending[index].category || "").toLocaleLowerCase();
+  let start = index;
+  let end = index;
+  while (start > 0 && (pending[start - 1].category || "").toLocaleLowerCase() === key) {
+    start -= 1;
+  }
+  while (
+    end < pending.length - 1 &&
+    (pending[end + 1].category || "").toLocaleLowerCase() === key
+  ) {
+    end += 1;
+  }
+
   const target = direction === "up" ? index - 1 : index + 1;
-  if (index < 0 || target < 0 || target >= pending.length) return;
+  if (target < start || target > end) return;
 
   [pending[index], pending[target]] = [pending[target], pending[index]];
   applyOrder(pending);
@@ -1140,11 +1648,17 @@ async function moveTask(taskId, direction) {
 }
 
 function dropTask(dragId, targetId) {
-  if (dragId === targetId) return;
-  const pending = state.tasks.filter((task) => task.status === "pending");
+  if (dragId === targetId || state.filter.trim()) return;
+  const pending = orderedPending();
   const from = pending.findIndex((task) => task.id === dragId);
   const to = pending.findIndex((task) => task.id === targetId);
   if (from < 0 || to < 0) return;
+
+  const fromKey = (pending[from].category || "").toLocaleLowerCase();
+  const toKey = (pending[to].category || "").toLocaleLowerCase();
+  // Dragging across a section boundary would silently recategorise the item.
+  // Keep drag as a pure reorder; categories are changed explicitly.
+  if (fromKey !== toKey) return;
 
   const [moved] = pending.splice(from, 1);
   pending.splice(to, 0, moved);
@@ -1229,6 +1743,10 @@ async function deleteList() {
 
 function toggleEdit() {
   state.editing = !state.editing;
+  if (!state.editing) {
+    state.selecting = false;
+    state.selected.clear();
+  }
   render();
   const button = document.querySelector('[data-action="toggle-edit"]');
   if (button) button.focus();
@@ -1638,6 +2156,33 @@ function wireEvents() {
       case "toggle-edit":
         toggleEdit();
         break;
+      case "select-items":
+        enterSelection();
+        break;
+      case "cancel-selection":
+        exitSelection();
+        break;
+      case "select-all":
+        selectAllVisible();
+        break;
+      case "clear-selection":
+        clearSelection();
+        break;
+      case "bulk-category":
+        openCategoryDialog([...state.selected]);
+        break;
+      case "bulk-complete":
+        await bulkStatus("completed");
+        break;
+      case "bulk-reopen":
+        await bulkStatus("pending");
+        break;
+      case "bulk-delete":
+        await bulkDelete();
+        break;
+      case "set-category":
+        openCategoryDialog([taskIdOf(target)]);
+        break;
       case "share":
         await openShareDialog();
         break;
@@ -1677,7 +2222,15 @@ function wireEvents() {
   dom.main.addEventListener("change", (event) => {
     if (!event.target.classList.contains("task-check")) return;
     const taskId = taskIdOf(event.target);
-    if (taskId !== null) toggleTask(taskId);
+    if (taskId === null) return;
+
+    if (state.selecting) {
+      if (event.target.checked) state.selected.add(taskId);
+      else state.selected.delete(taskId);
+      updateSelectionUI();
+      return;
+    }
+    toggleTask(taskId);
   });
 
   dom.main.addEventListener("submit", (event) => {
@@ -1693,6 +2246,9 @@ function wireEvents() {
     }
     if (event.target.id === "task-filter") {
       state.filter = event.target.value;
+      // A selection made before filtering should not silently include rows
+      // that are now hidden.
+      if (state.selecting) state.selected.clear();
       render();
       const input = document.getElementById("task-filter");
       if (input) {
@@ -1862,6 +2418,23 @@ function wireEvents() {
 
   dom.importFile.addEventListener("change", () => {
     importList(dom.importFile.files[0]);
+  });
+
+  // -- category dialog -------------------------------------------------
+
+  dom.categoryForm.addEventListener("submit", (event) => {
+    event.preventDefault();
+    applyCategory(dom.categoryForm.elements.category.value);
+  });
+
+  dom.categoryDialog.addEventListener("click", (event) => {
+    const target = event.target.closest('[data-action="clear-category"]');
+    if (!target) return;
+    applyCategory("");
+  });
+
+  dom.categoryDialog.addEventListener("close", () => {
+    state.categoryTargets = [];
   });
 
   window.addEventListener("online", async () => {

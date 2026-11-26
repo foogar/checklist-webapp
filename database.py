@@ -18,7 +18,7 @@ from typing import Iterator
 from config import settings
 
 DB_FILE = str(settings.database_path)
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 def connect() -> sqlite3.Connection:
@@ -290,7 +290,16 @@ def _migrate_3(conn: sqlite3.Connection) -> None:
     conn.execute("UPDATE tasks SET updated_at = COALESCE(updated_at, created_at)")
 
 
-MIGRATIONS = {1: _migrate_1, 2: _migrate_2, 3: _migrate_3}
+def _migrate_4(conn: sqlite3.Connection) -> None:
+    """Free-text category for grouping items, e.g. Dairy or Tesco.
+
+    Text rather than a category table keeps assignment queueable offline: the
+    value travels with the task, so there is no new id to reconcile.
+    """
+    _add_column(conn, "tasks", "category", "TEXT")
+
+
+MIGRATIONS = {1: _migrate_1, 2: _migrate_2, 3: _migrate_3, 4: _migrate_4}
 
 
 def init_db() -> int:

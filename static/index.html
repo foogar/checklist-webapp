@@ -156,6 +156,23 @@
     </form>
   </dialog>
 
+  <dialog class="dialog" id="dlg-category">
+    <form class="dialog-body" id="form-category">
+      <h2 data-field="category-title">Set category</h2>
+      <label class="field">
+        <span>Category</span>
+        <input name="category" list="category-options" maxlength="40" autocomplete="off" placeholder="e.g. Dairy">
+      </label>
+      <datalist id="category-options"></datalist>
+      <p class="muted">Leave blank to move the items to Uncategorised.</p>
+      <div class="dialog-actions">
+        <button type="button" class="button button-ghost" data-action="clear-category">Uncategorised</button>
+        <button type="button" class="button" data-action="close-dialog">Cancel</button>
+        <button type="submit" class="button button-primary">Apply</button>
+      </div>
+    </form>
+  </dialog>
+
   <input type="file" id="import-file" accept="application/json,.json" hidden>
 
   <template id="tpl-signed-out">
@@ -217,6 +234,7 @@
         </div>
         <div class="workspace-actions">
           <button type="button" class="button button-ghost" data-action="toggle-edit" aria-pressed="false">Edit</button>
+          <button type="button" class="button button-ghost" data-action="select-items" hidden>Select</button>
           <button type="button" class="button button-ghost" data-action="share" hidden>Share</button>
           <button type="button" class="button button-ghost" data-action="settings" hidden>Settings</button>
           <a class="button button-ghost" data-action="export" href="#" hidden>Export List</a>
@@ -242,6 +260,21 @@
         <input id="task-filter" type="search" placeholder="Filter items…" autocomplete="off">
       </form>
 
+      <div class="bulk-bar" data-slot="bulk-bar" hidden>
+        <div class="bulk-info">
+          <span class="bulk-count" data-field="bulk-count" role="status"></span>
+          <button type="button" class="link-button" data-action="select-all">Select all</button>
+          <button type="button" class="link-button" data-action="clear-selection">Clear</button>
+        </div>
+        <div class="bulk-actions">
+          <button type="button" class="button button-ghost" data-action="bulk-category">Category</button>
+          <button type="button" class="button button-ghost" data-action="bulk-complete">Complete</button>
+          <button type="button" class="button button-ghost" data-action="bulk-reopen">Reopen</button>
+          <button type="button" class="link-button danger" data-action="bulk-delete">Delete</button>
+          <button type="button" class="button" data-action="cancel-selection">Cancel</button>
+        </div>
+      </div>
+
       <div class="undo-bar" data-slot="undo-bar" hidden>
         <span data-field="undo-text" role="status"></span>
         <button type="button" class="link-button" data-action="undo-delete">Undo</button>
@@ -249,7 +282,7 @@
       </div>
 
       <div class="task-card" data-slot="task-card">
-        <ul class="tasks" data-slot="pending"></ul>
+        <div data-slot="pending-groups"></div>
 
         <section class="completed" data-slot="completed" hidden>
           <h2 class="completed-title">Completed</h2>
@@ -271,6 +304,7 @@
         <input type="checkbox" class="task-check">
         <span class="task-title" data-field="title"></span>
       </label>
+      <button type="button" class="category-chip" data-action="set-category" hidden></button>
       <span class="task-meta" data-field="meta"></span>
       <div class="task-actions">
         <button type="button" class="icon-small" data-action="move-up" aria-label="Move up">↑</button>

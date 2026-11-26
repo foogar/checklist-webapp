@@ -127,6 +127,12 @@ class ShellTests(unittest.TestCase):
         # Export moved out of the settings dialog, so its old label is gone.
         self.assertNotIn("Export JSON", body)
 
+    def test_bulk_and_category_controls_are_present(self):
+        body = self.client.get("/").text
+        self.assertIn('data-action="select-items"', body)
+        self.assertIn('data-slot="bulk-bar"', body)
+        self.assertIn('id="dlg-category"', body)
+
     def test_manifest_is_installable(self):
         response = self.client.get("/manifest.json")
         self.assertEqual(response.status, 200)
@@ -377,8 +383,11 @@ class ListApiTests(unittest.TestCase):
         self.assertEqual(response.status, 201)
         return response.json()
 
-    def make_task(self, list_id, title="Milk"):
-        response = self.post(f"/api/lists/{list_id}/tasks", {"title": title})
+    def make_task(self, list_id, title="Milk", category=None):
+        body = {"title": title}
+        if category is not None:
+            body["category"] = category
+        response = self.post(f"/api/lists/{list_id}/tasks", body)
         self.assertEqual(response.status, 201)
         return response.json()["task"]
 
@@ -1113,6 +1122,257 @@ class SharingTests(unittest.TestCase):
         )
 
 
+class CategoryBulkTests(unittest.TestCase):
+    def setUp(self):
+        reset_database()
+        self.uid = create_user("owner@test.local", "Owner")
+        self.other_uid = create_user("other@test.local", "Other")
+        self.client = TestClient(main.app)
+        self.client.cookies[settings.cookie_name] = session_cookie(
+            self.uid, csrf="csrf-owner"
+        )
+        self.other = TestClient(main.app)
+        self.other.cookies[settings.cookie_name] = session_cookie(
+            self.other_uid, csrf="csrf-other"
+        )
+
+    def post(self, path, body, client=None):
+        client = client or self.client
+        token = "csrf-owner" if client is self.client else "csrf-other"
+        return client.post(path, json_body=body, headers={"x-csrf-token": token})
+
+    def patch(self, path, body, client=None):
+        client = client or self.client
+        token = "csrf-owner" if client is self.client else "csrf-other"
+        return client.patch(path, json_body=body, headers={"x-csrf-token": token})
+
+    def make_list(self, title="Chores", resettable=False):
+        response = self.post(
+            "/api/lists", {"title": title, "is_resettable": resettable}
+        )
+        self.assertEqual(response.status, 201)
+        return response.json()
+
+    def make_task(self, list_id, title="Milk", category=None):
+        body = {"title": title}
+        if category is not None:
+            body["category"] = category
+        response = self.post(f"/api/lists/{list_id}/tasks", body)
+        self.assertEqual(response.status, 201)
+        return response.json()["task"]
+
+    # -- categories and bulk actions -----------------------------------
+
+    def test_category_on_create_and_patch(self):
+        created = self.make_list()
+        task = self.make_task(created["id"], "Milk", category="  Dairy  ")
+        self.assertEqual(task["category"], "Dairy")
+
+        patched = self.patch(f"/api/tasks/{task['id']}", {"category": " Fruit   &  Veg "})
+        self.assertEqual(patched.status, 200)
+        self.assertEqual(patched.json()["task"]["category"], "Fruit & Veg")
+
+        cleared = self.patch(f"/api/tasks/{task['id']}", {"category": "   "})
+        self.assertEqual(cleared.status, 200)
+        self.assertIsNone(cleared.json()["task"]["category"])
+
+        self.assertEqual(
+            self.patch(f"/api/tasks/{task['id']}", {"category": 5}).status, 422
+        )
+        self.assertEqual(
+            self.patch(f"/api/tasks/{task['id']}", {"category": "x" * 41}).status, 422
+        )
+
+    def test_category_survives_other_edits(self):
+        created = self.make_list()
+        task = self.make_task(created["id"], "Milk", category="Dairy")
+        self.patch(f"/api/tasks/{task['id']}", {"status": "completed"})
+        self.patch(f"/api/tasks/{task['id']}", {"title": "Oat milk"})
+
+        state = self.client.get(f"/api/lists/{created['id']}/state").json()
+        self.assertEqual(state["tasks"][0]["category"], "Dairy")
+
+    def test_bulk_category_and_status(self):
+        created = self.make_list()
+        tasks = [self.make_task(created["id"], title) for title in ("Milk", "Bread", "Soap")]
+        ids = [task["id"] for task in tasks]
+        before = self.client.get(f"/api/lists/{created['id']}").json()["version"]
+
+        response = self.post(
+            f"/api/lists/{created['id']}/bulk",
+            {"action": "category", "task_ids": ids, "category": "Dairy"},
+        )
+        self.assertEqual(response.status, 200)
+        self.assertEqual({task["category"] for task in response.json()["tasks"]}, {"Dairy"})
+        self.assertGreater(response.json()["version"], before)
+
+        completed = self.post(
+            f"/api/lists/{created['id']}/bulk",
+            {"action": "status", "task_ids": ids, "status": "completed"},
+        )
+        self.assertEqual(completed.status, 200)
+        self.assertEqual({task["status"] for task in completed.json()["tasks"]}, {"completed"})
+        self.assertEqual(
+            {task["completed_by"] for task in completed.json()["tasks"]}, {self.uid}
+        )
+
+        reopened = self.post(
+            f"/api/lists/{created['id']}/bulk",
+            {"action": "status", "task_ids": ids[:2], "status": "pending"},
+        )
+        self.assertEqual(reopened.status, 200)
+        statuses = {task["id"]: task["status"] for task in reopened.json()["tasks"]}
+        self.assertEqual(statuses[ids[0]], "pending")
+        self.assertEqual(statuses[ids[2]], "completed")
+
+        actions = [entry["action"] for entry in reopened.json()["activity"]]
+        self.assertIn("bulk.categorized", actions)
+        self.assertIn("bulk.completed", actions)
+        self.assertIn("bulk.reopened", actions)
+
+    def test_bulk_delete_and_restore(self):
+        created = self.make_list()
+        first = self.make_task(created["id"], "Milk")
+        second = self.make_task(created["id"], "Bread")
+
+        response = self.post(
+            f"/api/lists/{created['id']}/bulk",
+            {"action": "delete", "task_ids": [first["id"], second["id"]]},
+        )
+        self.assertEqual(response.status, 200)
+        self.assertTrue(response.json()["deleted"])
+        self.assertEqual(response.json()["tasks"], [])
+        self.assertIn(
+            "bulk.deleted", [entry["action"] for entry in response.json()["activity"]]
+        )
+
+        restored = self.client.post(
+            f"/api/tasks/{first['id']}/restore",
+            headers={"x-csrf-token": "csrf-owner"},
+        )
+        self.assertEqual(restored.status, 200)
+        self.assertEqual(
+            [task["title"] for task in self.client.get(f"/api/lists/{created['id']}/tasks").json()["tasks"]],
+            ["Milk"],
+        )
+
+    def test_bulk_validation_and_permissions(self):
+        created = self.make_list()
+        task = self.make_task(created["id"])
+        path = f"/api/lists/{created['id']}/bulk"
+
+        for body in (
+            {"action": "nope", "task_ids": [task["id"]]},
+            {"action": "category", "task_ids": []},
+            {"action": "category", "task_ids": [task["id"]]},
+            {"action": "category", "task_ids": [task["id"], task["id"]], "category": "x"},
+            {"action": "status", "task_ids": [task["id"]], "status": "nope"},
+            {"action": "category", "task_ids": ["x"], "category": "x"},
+        ):
+            self.assertEqual(self.post(path, body).status, 422)
+
+        other_list = self.make_list("Other")
+        foreign = self.make_task(other_list["id"], "Elsewhere")
+        self.assertEqual(
+            self.post(
+                path,
+                {"action": "category", "task_ids": [foreign["id"]], "category": "x"},
+            ).status,
+            409,
+        )
+
+        with database.connection() as conn:
+            conn.execute(
+                "INSERT INTO list_shares (list_id, user_id, role) VALUES (?, ?, 'viewer')",
+                (created["id"], self.other_uid),
+            )
+        self.assertEqual(
+            self.post(
+                path,
+                {"action": "category", "task_ids": [task["id"]], "category": "x"},
+                client=self.other,
+            ).status,
+            403,
+        )
+        self.assertEqual(
+            self.patch(
+                f"/api/tasks/{task['id']}", {"category": "x"}, client=self.other
+            ).status,
+            403,
+        )
+
+        stranger = create_user("stranger@test.local", "Stranger")
+        outsider = TestClient(main.app)
+        outsider.cookies[settings.cookie_name] = session_cookie(
+            stranger, csrf="csrf-stranger"
+        )
+        self.assertEqual(
+            outsider.post(
+                path,
+                json_body={
+                    "action": "category",
+                    "task_ids": [task["id"]],
+                    "category": "x",
+                },
+                headers={"x-csrf-token": "csrf-stranger"},
+            ).status,
+            404,
+        )
+
+    def test_bulk_idempotency_replay(self):
+        created = self.make_list()
+        task = self.make_task(created["id"])
+        headers = {
+            "x-csrf-token": "csrf-owner",
+            "idempotency-key": "bulk-op-12345678",
+        }
+        body = {
+            "action": "category",
+            "task_ids": [task["id"]],
+            "category": "Dairy",
+        }
+        first = self.client.post(
+            f"/api/lists/{created['id']}/bulk", json_body=body, headers=headers
+        )
+        second = self.client.post(
+            f"/api/lists/{created['id']}/bulk", json_body=body, headers=headers
+        )
+        self.assertEqual((first.status, second.status), (200, 200))
+        self.assertEqual(second.headers["idempotent-replay"], "true")
+        self.assertEqual(first.json(), second.json())
+
+        with database.connection() as conn:
+            count = conn.execute(
+                "SELECT COUNT(*) FROM activity WHERE action = 'bulk.categorized'"
+            ).fetchone()[0]
+        self.assertEqual(count, 1)
+
+    def test_export_and_import_carry_category(self):
+        created = self.make_list("Groceries")
+        self.make_task(created["id"], "Milk", category="Dairy")
+        self.make_task(created["id"], "Apples", category="Produce")
+
+        payload = self.client.get(f"/api/lists/{created['id']}/export").json()
+        self.assertEqual(
+            [(task["title"], task["category"]) for task in payload["tasks"]],
+            [("Milk", "Dairy"), ("Apples", "Produce")],
+        )
+
+        imported = self.client.post(
+            "/api/import",
+            json_body={"list": payload["list"], "tasks": payload["tasks"]},
+            headers={"x-csrf-token": "csrf-owner"},
+        )
+        self.assertEqual(imported.status, 201)
+        tasks = self.client.get(
+            f"/api/lists/{imported.json()['list']['id']}/tasks"
+        ).json()["tasks"]
+        self.assertEqual(
+            [(task["title"], task["category"]) for task in tasks],
+            [("Milk", "Dairy"), ("Apples", "Produce")],
+        )
+
+
 class MigrationTests(unittest.TestCase):
     def test_schema_version_is_current(self):
         self.assertEqual(database.init_db(), database.SCHEMA_VERSION)
@@ -1140,9 +1400,12 @@ class MigrationTests(unittest.TestCase):
 
             database._migrate_2(conn)
             database._migrate_3(conn)
+            database._migrate_4(conn)
 
             columns = {row[1] for row in conn.execute("PRAGMA table_info(tasks)")}
-            self.assertTrue({"created_by", "completed_at", "deleted_at"} <= columns)
+            self.assertTrue(
+                {"created_by", "completed_at", "deleted_at", "category"} <= columns
+            )
 
             list_columns = {row[1] for row in conn.execute("PRAGMA table_info(lists)")}
             self.assertIn("version", list_columns)

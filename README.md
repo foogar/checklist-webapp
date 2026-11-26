@@ -19,9 +19,13 @@ library. The frontend is hand-written CSS and JavaScript with no build step.
   circulating cannot be used to get back in.
 - **Daily reset** — a Reset button for daily lists, or a scheduled reset at a
   chosen hour in a chosen time zone.
+- **Categories** — a free-text category per item (Dairy, Tesco, …), with the
+  list grouped into sections and autocomplete from categories already in use.
+- **Bulk actions** — select several items to set a category, complete, reopen,
+  or delete them together, with one undo for a batch delete.
 - **Offline** — the shell is cached, changes queue in the browser, and replay
   exactly once when the connection returns.
-- **Undo** for deleted items.
+- **Undo** for deleted items, singly or as a batch.
 - **Export and import** as JSON.
 - **Google sign-in**, dark mode, installable PWA with the existing app icon.
 
@@ -173,9 +177,10 @@ python tests/test_api.py
 # or: python -m unittest discover -s tests -v
 ```
 
-76 checks, standard library only. They run against a temporary database and
+85 checks, standard library only. They run against a temporary database and
 cover authentication, access control, roles, blocks, invite links, scheduled
-resets, idempotent retries, validation, and migrations from a v1 database.
+resets, categories and bulk actions, idempotent retries, validation, and
+migrations from a v1 database.
 
 ## Upgrading from the FastAPI version
 

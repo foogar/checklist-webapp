@@ -28,6 +28,7 @@ from web import HTTPError, Request, Response, json_response, no_content, redirec
 
 MAX_LIST_TITLE = 200
 MAX_TASK_TITLE = 500
+MAX_CATEGORY = 40
 POSITION_STEP = 1024
 
 LIST_COLUMNS = """
@@ -59,7 +60,7 @@ LIST_ACCESS = """
 """
 
 TASK_SELECT = """
-    SELECT t.id, t.title, t.status, t.position, t.created_at, t.updated_at,
+    SELECT t.id, t.title, t.status, t.position, t.category, t.created_at, t.updated_at,
            t.completed_at, t.created_by, cu.name AS created_by_name,
            t.completed_by, du.name AS completed_by_name
     FROM tasks t
@@ -102,6 +103,25 @@ def _flag(data: dict[str, Any], field: str, default: bool = False) -> bool:
     value = data.get(field, default)
     if not isinstance(value, bool):
         raise HTTPError(422, f"{field} must be true or false")
+    return value
+
+
+def _category_value(value: Any) -> str | None:
+    """Normalise a category, treating blank as 'no category'.
+
+    Whitespace is collapsed so "Fruit  &  Veg" and "Fruit & Veg" group
+    together, and a value made only of spaces clears the category rather than
+    creating an invisible one.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise HTTPError(422, "category must be text")
+    value = " ".join(value.split())
+    if not value:
+        return None
+    if len(value) > MAX_CATEGORY:
+        raise HTTPError(422, f"category must be {MAX_CATEGORY} characters or fewer")
     return value
 
 
@@ -187,6 +207,7 @@ def _task_json(row: sqlite3.Row) -> dict[str, Any]:
         "title": row["title"],
         "status": row["status"],
         "position": row["position"],
+        "category": row["category"],
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
         "created_by": row["created_by"],
@@ -656,6 +677,7 @@ def register(route) -> None:
         list_id = int(request.params["list_id"])
         data = _body(request)
         title = _text(data, "title", MAX_TASK_TITLE)
+        category = _category_value(data.get("category"))
 
         # An offline client retries a queued create with the same key. The
         # stored response is replayed instead of inserting a second task, so a
@@ -690,9 +712,17 @@ def register(route) -> None:
                 ).fetchone()[0]
                 cursor = conn.execute(
                     "INSERT INTO tasks "
-                    "(list_id, title, position, created_by, created_at, updated_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?)",
-                    (list_id, title, position, user["id"], utcnow(), utcnow()),
+                    "(list_id, title, category, position, created_by, created_at, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        list_id,
+                        title,
+                        category,
+                        position,
+                        user["id"],
+                        utcnow(),
+                        utcnow(),
+                    ),
                 )
                 task_id = cursor.lastrowid
                 _touch(conn, list_id)
@@ -752,6 +782,10 @@ def register(route) -> None:
             else:
                 values.extend([status, None, None])
 
+        if "category" in data:
+            assignments.append("category = ?")
+            values.append(_category_value(data["category"]))
+
         if not assignments:
             raise HTTPError(422, "Nothing to update")
 
@@ -776,8 +810,10 @@ def register(route) -> None:
                         if data["status"] == "completed"
                         else "task.reopened"
                     )
-                else:
+                elif "title" in data:
                     action = "task.renamed"
+                else:
+                    action = "task.categorized"
                 _record(conn, list_id, user["id"], action, task_id, activity_title)
             result = _fetch_task(conn, task_id)
             version = _version(conn, list_id)
@@ -874,6 +910,172 @@ def register(route) -> None:
                 _touch(conn, list_id)
             version = _version(conn, list_id)
         return json_response({"version": version})
+
+    @route("POST", r"/api/lists/(?P<list_id>\d+)/bulk")
+    async def bulk_update(request: Request) -> Response:
+        """Apply one action to several items in a single transaction.
+
+        One version bump and one activity summary, rather than N of each. The
+        operation is naturally idempotent (setting a category/status, or
+        soft-deleting), and an Idempotency-Key replay protects against a lost
+        response on a queued offline action.
+        """
+        user = auth.require_user(request)
+        auth.require_csrf(request)
+        list_id = int(request.params["list_id"])
+        data = _body(request)
+
+        action = data.get("action")
+        if action not in {"category", "status", "delete"}:
+            raise HTTPError(422, "action must be 'category', 'status', or 'delete'")
+
+        task_ids = data.get("task_ids")
+        if (
+            not isinstance(task_ids, list)
+            or not task_ids
+            or len(task_ids) > 500
+            or not all(
+                isinstance(value, int) and not isinstance(value, bool)
+                for value in task_ids
+            )
+        ):
+            raise HTTPError(
+                422, "task_ids must be a non-empty list of up to 500 integers"
+            )
+        if len(set(task_ids)) != len(task_ids):
+            raise HTTPError(422, "task_ids contains duplicates")
+
+        category: str | None = None
+        status: str | None = None
+        if action == "category":
+            if "category" not in data:
+                raise HTTPError(422, "category is required")
+            category = _category_value(data["category"])
+        elif action == "status":
+            status = data.get("status")
+            if status not in {"pending", "completed"}:
+                raise HTTPError(422, "status must be 'pending' or 'completed'")
+
+        key = request.header("idempotency-key").strip()
+        if key and not re.fullmatch(r"[A-Za-z0-9_-]{8,100}", key):
+            raise HTTPError(422, "Invalid Idempotency-Key")
+
+        with connection() as conn:
+            _require(conn, list_id, user["id"], write=True)
+
+            if key:
+                replay = conn.execute(
+                    "SELECT status, response_json FROM idempotency "
+                    "WHERE key = ? AND user_id = ?",
+                    (key, user["id"]),
+                ).fetchone()
+                if replay:
+                    return Response(
+                        status=replay["status"],
+                        body=replay["response_json"].encode("utf-8"),
+                        headers={
+                            "Content-Type": "application/json; charset=utf-8",
+                            "Idempotent-Replay": "true",
+                        },
+                    )
+
+            existing = {
+                row["id"]
+                for row in conn.execute(
+                    "SELECT id FROM tasks WHERE list_id = ? AND deleted_at IS NULL",
+                    (list_id,),
+                )
+            }
+            if not set(task_ids).issubset(existing):
+                # One of the selected items was removed elsewhere. Guessing
+                # which is safer than applying half the batch.
+                raise HTTPError(409, "The list changed; reload and try again")
+
+            now = utcnow()
+            placeholders = ",".join("?" for _ in task_ids)
+            with transaction(conn):
+                if action == "category":
+                    conn.execute(
+                        f"UPDATE tasks SET category = ?, updated_at = ? "
+                        f"WHERE list_id = ? AND id IN ({placeholders})",
+                        [category, now, list_id, *task_ids],
+                    )
+                    _touch(conn, list_id)
+                    _record(
+                        conn,
+                        list_id,
+                        user["id"],
+                        "bulk.categorized",
+                        detail=category or "Uncategorised",
+                    )
+                elif action == "status":
+                    conn.execute(
+                        f"UPDATE tasks SET status = ?, completed_at = ?, "
+                        f"completed_by = ?, updated_at = ? "
+                        f"WHERE list_id = ? AND id IN ({placeholders})",
+                        [
+                            status,
+                            now if status == "completed" else None,
+                            user["id"] if status == "completed" else None,
+                            now,
+                            list_id,
+                            *task_ids,
+                        ],
+                    )
+                    _touch(conn, list_id)
+                    _record(
+                        conn,
+                        list_id,
+                        user["id"],
+                        "bulk.completed" if status == "completed" else "bulk.reopened",
+                        detail=str(len(task_ids)),
+                    )
+                else:
+                    conn.execute(
+                        f"UPDATE tasks SET deleted_at = ?, updated_at = ? "
+                        f"WHERE list_id = ? AND id IN ({placeholders})",
+                        [now, now, list_id, *task_ids],
+                    )
+                    _touch(conn, list_id)
+                    _record(
+                        conn,
+                        list_id,
+                        user["id"],
+                        "bulk.deleted",
+                        detail=str(len(task_ids)),
+                    )
+
+                payload: dict[str, Any] = {
+                    "version": _version(conn, list_id),
+                    "tasks": _tasks(conn, list_id),
+                    "activity": _activity(conn, list_id),
+                }
+                if action == "delete":
+                    payload["deleted"] = True
+
+                if key:
+                    conn.execute(
+                        "INSERT OR REPLACE INTO idempotency "
+                        "(key, user_id, status, response_json, created_at) "
+                        "VALUES (?, ?, ?, ?, ?)",
+                        (
+                            key,
+                            user["id"],
+                            200,
+                            json.dumps(
+                                payload, separators=(",", ":"), ensure_ascii=False
+                            ),
+                            utcnow(),
+                        ),
+                    )
+                    cutoff = (
+                        datetime.now(dt_timezone.utc) - timedelta(hours=24)
+                    ).isoformat(timespec="seconds").replace("+00:00", "Z")
+                    conn.execute(
+                        "DELETE FROM idempotency WHERE created_at < ?", (cutoff,)
+                    )
+
+        return json_response(payload)
 
     @route("POST", r"/api/lists/(?P<list_id>\d+)/reset")
     async def reset_list(request: Request) -> Response:
@@ -1160,6 +1362,7 @@ def register(route) -> None:
                 {
                     "title": task["title"],
                     "status": task["status"],
+                    "category": task["category"],
                     "position": task["position"],
                     "created_at": task["created_at"],
                     "completed_at": task["completed_at"],
@@ -1209,15 +1412,17 @@ def register(route) -> None:
                     status = task.get("status")
                     if status not in {"pending", "completed"}:
                         status = "pending"
+                    category = _category_value(task.get("category"))
                     conn.execute(
                         "INSERT INTO tasks "
-                        "(list_id, title, status, position, created_by, "
+                        "(list_id, title, status, category, position, created_by, "
                         "created_at, updated_at) "
-                        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                         (
                             list_id,
                             task_title,
                             status,
+                            category,
                             index * POSITION_STEP,
                             user["id"],
                             utcnow(),
